@@ -1,0 +1,67 @@
+# GTA IV Proper Grass
+
+GPU-instanced procedural vegetation for **Grand Theft Auto IV (1.2.0.59, Complete Edition)**.
+It fixes the game's long-standing grass problem: many grass surfaces never get plants, and the ones that do run out of
+plant objects, pop in and vanish at some camera angles. The mod keeps the game's own plants and its own look, but draws them
+with hardware instancing, so a far denser, longer-reaching lawn costs a handful of draw calls.
+
+Inspired by *SA Proper Shaders* (GTA SA). Works alongside FusionFix, DXVK and DLSS-IV.
+
+## What it does
+- **Grass where the game left none.** The grass materials (`GRASS`, `SHORT_GRASS`, `GRASS_PATCHY`, `GRASS_LONG`) ship without a procedural tag, so parks, medians and slopes stay bare. The mod gives them one.
+- **No more object limit.** The plant triangle pool grows from 512 to 16384, and plants are drawn as instances instead of one game object each.
+- **Longer reach with a soft fade.** Plants grow in over the last metres instead of popping in.
+- **Clean borders.** Plants no longer spill onto asphalt or sidewalks.
+- **View-cone culling** keeps the GPU cost low.
+
+## Requirements
+- GTA IV Complete Edition **1.2.0.59** (Steam). Other versions are not supported: the mod checks the executable and disables itself if it does not match.
+- An ASI loader ([FusionFix](https://github.com/ThirteenAG/GTAIV.EFLC.FusionFix) includes one).
+- `d3dx9_43.dll` (installed by the DirectX redistributable that ships with the game).
+
+## Install
+Copy `GTAIV.ProperGrass.asi` and `ProperGrass.ini` into the `plugins` folder next to `GTAIV.exe`
+(or wherever your ASI loader reads plugins from). Uninstall by deleting both files.
+
+## Settings (`ProperGrass.ini`)
+| Key | Default | Meaning |
+|---|---|---|
+| `RadiusMultiplier` | 1.5 | Plant radius = (20 + 0.5 x Detail Distance) x this value |
+| `DrawDistance` | 0 | Fixed radius in metres (0 = use the formula above) |
+| `FadeWidth` | 12 | Metres over which plants grow in at the edge of the radius |
+| `DensityMultiplier` | 1.0 | Scales plant density |
+| `TriCapacity` | 16384 | Active plant triangles |
+| `EdgeMargin` / `EdgeSoft` | 0.35 / 1.0 | Keeps plants away from the border of a grass area |
+| `FrustumCull` | 1 | Skip plants outside the camera view |
+| `GrassMaterials` | see file | `NAME@TAG` list of materials that receive plants |
+
+Diagnostics: `Debug=1` writes extra detail to `ProperGrass.log`. `Profile=1` shows an on-screen performance panel;
+with `ToggleKey=0x76` (F7) you can switch live between **MOD**, **VANILLA** and **NO-INSTANCING**, and `CullKey=0x77` (F8) toggles culling.
+
+## Performance
+Measured with the on-screen profiler in Meadows Park (RTX-class GPU, 1440p). Frame rate varies a lot with traffic and pedestrians, so use the profiler on your own system.
+
+| Settings | Vanilla | Mod |
+|---|---|---|
+| View/Detail/Vehicle 100/100/100 | 70-117 fps | 71-119 fps (draw calls about 300 lower) |
+| FusionFix recommended 27/31/50 | ~200 fps | ~170 fps, 1% lows unchanged, grass reaches ~1.5x farther |
+
+The mod costs roughly 0.2-0.4 ms on the main thread, under 0.1 ms on the render thread and 0.5-0.8 ms of GPU time.
+
+## Known limitations
+- The airport-highway median has concrete collision under its grass, so it stays bare.
+- A few plant models cannot be instanced and remain ordinary game objects.
+- Grass looks as glossy under car headlights as in vanilla; custom lighting is not part of this release.
+- Only 1.2.0.59 is supported.
+
+## Build
+```
+sudo apt install g++-mingw-w64-i686
+./build.sh        # produces build/GTAIV.ProperGrass.asi
+```
+
+## How it works (short)
+The plant manager's candidate-add function is hooked so each plant is stored as a compact instance instead of a game entity. Every frame the visible instances are packed into a vertex buffer and drawn at the start of the deferred G-buffer pass by replaying the plant model's own entity draw command with a patched vertex shader (`SetStreamSourceFreq` instancing, d3dx9 assembler at runtime).
+
+## License
+MIT. Not affiliated with Rockstar Games. Use at your own risk and keep a backup of your game.
