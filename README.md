@@ -14,6 +14,21 @@ Inspired by *SA Proper Shaders* (GTA SA). Works alongside FusionFix, DXVK and DL
 - **Clean borders.** Plants no longer spill onto asphalt or sidewalks.
 - **View-cone culling** keeps the GPU cost low.
 
+## How it differs from "Grass and Procedural Props Fix"
+[Grass and Procedural Props Fix](https://www.nexusmods.com/gta4/mods/1230) (iammrmikeman) is the established fix for the same symptom, and the two take different routes. Based on its Nexus page:
+
+| | Grass and Procedural Props Fix | Proper Grass |
+|---|---|---|
+| Approach | Raises the limits of the game's procedural-object storage (pool size, distances, density), so the game keeps creating and drawing one object per plant | Takes the plants out of the game's object system and draws them as GPU instances; also raises the triangle pool |
+| Cost per plant | Same as vanilla: every extra plant is another object and draw call | A few draw calls for all plants of a model |
+| Bare grass surfaces | Not covered by its description | Gives the untagged grass materials (`GRASS`, `SHORT_GRASS`, `GRASS_PATCHY`, `GRASS_LONG`) a plant tag, so parks, medians and slopes that never had plants get them |
+| Edges and fade | Not covered by its description | Keeps plants off asphalt and sidewalks, grows them in at the edge of the radius, culls them outside the camera view |
+| Other procedural objects | Plants, clutter, litter and more, with per-class density filters | Vegetation only |
+| Supported builds | 1.0.4.0 to Complete Edition 1.2.0.59 and VCNGE | 1.2.0.59 only |
+| Safety net | Hash check, startup validation, rollback | Signature check of the executable, disables itself on mismatch |
+
+In short: that mod makes the game's own system hold more; this one replaces how plants are drawn and fills in the grass the game never populated. If you only want more litter and props, or run another game build, use that mod. Both change the plant limits, so run one at a time unless you have tested the combination; they have not been tested together.
+
 ## Requirements
 - GTA IV Complete Edition **1.2.0.59** (Steam). Other versions are not supported: the mod checks the executable and disables itself if it does not match.
 - An ASI loader ([FusionFix](https://github.com/ThirteenAG/GTAIV.EFLC.FusionFix) includes one).
