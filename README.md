@@ -54,7 +54,7 @@ Diagnostics: `Debug=1` writes extra detail to `ProperGrass.log`. `Profile=1` sho
 with `ToggleKey=0x76` (F7) you can switch live between **MOD**, **VANILLA** and **NO-INSTANCING**, and `CullKey=0x77` (F8) toggles culling.
 
 ## Performance
-Measured with the on-screen profiler in Meadows Park (RTX-class GPU, 1440p). Frame rate varies a lot with traffic and pedestrians, so use the profiler on your own system.
+Measured with the on-screen profiler in Meadows Park (RTX 5070 Ti, i7-14700KF, 1440p). Frame rate varies a lot with traffic and pedestrians, so use the profiler on your own system.
 
 | Settings | Vanilla | Mod |
 |---|---|---|
