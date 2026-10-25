@@ -71,6 +71,34 @@ static const GameAddrs kCE = { "1.2.0.59 Complete Edition", false,
     0, 0xC87E27,
     0x53, 0x55, 0x55,
     8, 7, 9, 8, 12, 5, 11, 6, 0 };
+// Byte patterns ('?' = any byte) that find the same code and data in every build of the Complete Edition (the executable is
+// rebuilt between 1.2.0.x patches, so addresses move but the code does not). kind 0: function start = match + off,
+// 1: absolute address stored at match + off, 2: address of the byte at match + off. Patterns skip the first bytes of a
+// function on purpose, so a plugin that already hooked a function entry (FusionFix, ...) does not break the search.
+struct Sig { const char* name; int kind; const char* pat; int off; bool unique; };
+static const Sig kCESigs[] = {
+    { "CandidateAdd", 0, "83 EC 20 0F B7 82 28 52 00 00 3B 82 20 52 00 00 7D 7D 8B 45 08 F3 0F 10", -8, true },
+    { "TriRelease", 0, "46 48 00 00 00 00 74 0B 56 B9 ? ? ? ? E8 ? ? ? ? 8A 46 55 A8 02", -8, true },
+    { "TriNew", 0, "18 8B 55 10 56 8B 75 0C 57 8B 7D 08 89 4C 24 0C F3 0F 10 47 04 F3 0F 10", -8, true },
+    { "TriBuild", 0, "E8 00 00 00 A1 ? ? ? ? 33 C4 89 84 24 E4 00 00 00 8B 45 08 8B 55 10", -8, true },
+    { "GBufferBuild", 0, "? ? ? 83 C4 04 8D 8E B0 00 00 00 E8 ? ? ? ? 84 C0 74 05 0F 57 C0 EB 08 F3 0F 10 05 ? ? ? ? 6A 00 6A 18 F3 0F 11 44 24 0C E8 ? ? ? ? 83 C4 08 85 C0 74 1F F3 0F 10 44 24 04 6A 00 6A 01 51 8B C8 F3 0F 11 04 24 6A 01 6A 00 6A 01", -24, true },
+    { "BoundGate", 0, "8B 45 00 FF 50 54 8B D8 85 DB 7F 07 5D 32 C0 5B C2 04 00 56 33 F6 57 85", -8, true },
+    { "Reset", 0, "? ? A1 ? ? ? ? 85 C0 74 16 83 C0 F0 50 E8 ? ? ? ? 83 C4 04 C7", -8, true },
+    { "ResetAll", 0, "85 F6 74 20 8D 64 24 00 8D 04 76 C1 E0 05 0F B7 B0 ? ? ? ? 8D 88 ?", -8, true },
+    { "EntDraw", 0, "44 53 56 8B F1 57 0F B7 46 30 8B 04 85 ? ? ? ? 85 C0 0F 84 ? ? ?", -8, true },
+    { "DcAppend", 0, "56 57 8B F9 8B 07 FF 50 08 25 0F 00 00 80 79 05 48 83 C8 F0", 0, true },
+    { "DcAlloc", 0, "74 24 14 8B F7 F7 DE 83 E6 0F B9 ? ? ? ? 8D 04 3E 50 E8 ? ? ? ?", -8, true },
+    { "DcEntityCtor", 0, "8B 4C 24 1C 8B 47 04 C7 07 ? ? ? ? 33 05 ? ? ? ? 25 FF 3F 00 00", -8, true },
+    { "DcIdCounter", 1, "33 05 ? ? ? ? 57 25 FF 3F 00 00", 2, true },
+    { "ItemCount", 1, "8B 1C C5 ? ? ? ? 56 8B F3 C1 E6 04 03 F3 C1 E6 02 89 4C 24 0C 89 5C 24 08 39 86 ? ? ? ? 75 60 55 8B 6C 24 18 57 3B 1D ? ? ? ?", 42, true },
+    { "PlantMgr", 1, "B9 ? ? ? ? E9 ? ? ? ? CC CC CC CC CC CC CC CC 56 E8 ? ? ? ?", 1, true },
+    { "ModelInfoTable", 1, "8B 34 85 ? ? ? ? 8B 46 08 85 C0", 3, true },
+    { "CamPos", 1, "89 06 A0 ? ? ? ? 88 46 04 F3 0F 10 05 ? ? ? ?", 14, true },
+    { "D3DDevicePtr", 1, "85 FF 75 16 A1 ? ? ? ? 57 8B 10", 5, true },
+    { "DetailDist", 1, "8B 54 24 08 85 D2 74 07 F3 0F 10 62 0C EB 05 F3 0F 10 66 0C F3 0F 10 5E 10 F3 0F 10 0D ? ? ? ?", 29, true },
+    { "TriCapImm", 2, "CC CC CC CC CC CC C7 41 10 00 00 A0 41 C7 41 14 00 00 34 42", 23, true },
+    { "Cave", 2, "56 57 8B 7D 08 8B F1 8B 47 44 89 74 24 1C 85 C0 0F 84 ? ? ? ? 8B 40 38 85 C0 0F 84 ? ? ? ? 8B 40 04 8B 48 0C 89 4C 24 2C 85 C9 0F 84 ? ? ? ? 0F B7 47 54 89 44 24 14 D1 E8 39 81 CC 00 00 00 0F 85 ? ? ? ? 8B 4C 24 14 8B C1 99 83 E2 07 03 D0 C1 FA 03 85 D2 74 22 81 7D 10 7A 7A 7A 7A 74 19 8B C2 0F AF 45 10 83 7D 10 07 89 44 24 18 74 13 8B 4D 10 41 0F AF CA EB 06 33 C0 89 44 24 18 89 4C 24 14 3B C1 0F 8D ? ? ? ? 8B 54 24 18 8D 49 00 8B 47 50 0F B7 04 50 66 85 C0 74 47 8D 0C 40 8B 86 30 0F 00 00 C1 E1 05 83 C0 A0 03 C1 89 44 24 24 8A 48 55 F6 C1 02 74 26 F6 C1 04 75 21 50 B9 ? ? ? ? E8 ? ? ? ? 8B 54 24 18 8B 4C 24 14 85 C0 74 0E 8B 44 24 24 80 48 55 04 EB 04 8B 4C 24 14 8B 47 50 0F B7 04 50 66 85 C0 0F 84 ? ? ? ? 8D 0C 40 8B 86 30 0F 00 00 83 C0 A0 C1 E1 05 03 C8 8B 45 0C F3 0F 10 58 04 F3 0F 10 28 0F 28 E3 F3 0F 5C 61 14 0F 28 F3 F3 0F 5C 71 24 0F 28 C3 F3 0F 5C 59 34 F3 0F 5C 41 04 F3 0F 11 64 24 24 0F 28 FD F3 0F 5C 79 20 F3 0F 11 5C 24 50 F3 0F 10 5C 24 24 F3 0F 58 D8 0F 28 D5 F3 0F 5C 51 10 0F 28 CD F3 0F 5C 09 F3 0F 59 1D ? ? ? ? 0F 28 E2 F3 0F 11 54 24 30 F3 0F 11 5C 24 54 F3 0F 5C 69 30 0F 28 DF F3 0F 58 DA 0F 28 D6 F3 0F 58 54 24 24 F3 0F 11 74 24 4C F3 0F 58 F0 F3 0F 59 1D ? ? ? ? F3 0F 59 15 ? ? ? ? F3 0F 59 35 ? ? ? ? F3 0F 11 54 24 58 F3 0F 58 E1 0F 28 D7 F3 0F 58 D1 F3 0F 59 C9 F3 0F 59 25 ? ? ? ? F3 0F 59 15 ? ? ? ? F3 0F 59 C0 F3 0F 11 74 24 5C F3 0F 10 76 20 F3 0F 58 C8 0F 2F CE 0F 82 ? ? ? ? F3 0F 10 44 24 30 F3 0F 10 4C 24 24 F3 0F 59 C0 F3 0F 59 C9 F3 0F 58 C1 0F 2F C6 0F 82 ? ? ? ? F3 0F 10 44 24 4C F3 0F 59 FF F3 0F 59 C0 F3 0F 58 F8 0F 2F FE 0F 82 ? ? ? ? F3 0F 10 44 24 50 F3 0F 59 ED F3 0F 59 C0 F3 0F 58 E8 0F 2F EE 0F 82 ? ? ? ? F3 0F 10 44 24 54 F3 0F 59 E4 F3 0F 59 C0 F3 0F 58 E0 0F 2F E6 0F 82 ? ? ? ? F3 0F 10 44 24 58 F3 0F 59 DB F3 0F 59 C0 F3 0F 58 D8 0F 2F DE 0F 82 ? ? ? ? F3 0F 10 44 24 5C F3 0F 59 D2 F3 0F 59 C0 F3 0F 58 D0 0F 2F D6 0F 82 ? ? ? ? E8 ? ? ? ? 8B 47 50 8B 54 24 18 33 C9 66 89 0C 50 E9 ? ? ? ? F6 C2 01 0F 85 ? ? ? ? 0F B7 46 04 66 85 C0 0F 84 ? ? ? ? 8D 0C 40 8B 86 30 0F 00 00 C1 E1 05 66 83 7C 01 F6 00 0F 84 ? ? ? ? 8B 44 24 18 8B 7F 48 D1 F8 89 44 24 5C 8D 34 00 8B CE 83 E1 1F BA 01 00 00 00 D3 E2 8B C6 C1 F8 05 85 14 87 8D 56 01 0F 95 44 24 20 8B CA 83 E1 1F B8 01 00 00 00 D3 E0 C1 FA 05 85 04 97 0F 95 C0 80 7C 24 20 00", 798, true },
+};
 static const GameAddrs k1080 = { "1.0.8.0", true,
     0x9F91D0, 0xC16660, 0xC169F0, 0xC16CB0, 0xC17DCC, 0xCA3290, 0xC16170, 0xC173C0, 0xC16C50, 0x860170,
     0x475920, 0x85E390, 0x8600D0, 0xF35058,
@@ -80,6 +108,78 @@ static const GameAddrs k1080 = { "1.0.8.0", true,
     6, 6, 6, 5, 6, 5, 11, 6, 7 };
 static uintptr_t g_base;
 static inline uintptr_t A(uintptr_t va) { return va - 0x400000 + g_base; }
+
+
+// ---------------------------------------------------------------- pattern scanner (Complete Edition builds)
+static bool ParsePattern(const char* s, std::vector<uint8_t>& b, std::vector<uint8_t>& m)
+{
+    b.clear(); m.clear();
+    while (*s) {
+        while (*s == ' ') s++;
+        if (!*s) break;
+        if (*s == '?') { b.push_back(0); m.push_back(0); s++; continue; }
+        unsigned v; if (sscanf(s, "%2x", &v) != 1) return false;
+        b.push_back((uint8_t)v); m.push_back(1); s += 2;
+    }
+    return !b.empty();
+}
+// all matches of `pat` in the executable sections of the main module
+static std::vector<uintptr_t> ScanModule(const char* pat, size_t maxHits = 4)
+{
+    std::vector<uint8_t> b, m; std::vector<uintptr_t> hits;
+    if (!ParsePattern(pat, b, m)) return hits;
+    size_t f0 = 0; while (f0 < b.size() && !m[f0]) f0++;       // first byte that is not a wildcard (the search key)
+    if (f0 == b.size()) return hits;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)g_base;
+    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(g_base + dos->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        if (!(sec[i].Characteristics & (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE))) continue;
+        const uint8_t* lo = (const uint8_t*)(g_base + sec[i].VirtualAddress); size_t len = sec[i].Misc.VirtualSize;
+        if (len < b.size() || IsBadReadPtr(lo, len)) continue;
+        for (size_t p = 0; p + b.size() <= len; p++) {
+            const uint8_t* q = (const uint8_t*)memchr(lo + p + f0, b[f0], len - p - f0);
+            if (!q) break;
+            p = (size_t)(q - lo) - f0;
+            bool ok = true; for (size_t k = 0; k < b.size(); k++) if (m[k] && lo[p + k] != b[k]) { ok = false; break; }
+            if (ok) { hits.push_back((uintptr_t)(lo + p)); if (hits.size() >= maxHits) return hits; }
+        }
+    }
+    return hits;
+}
+// Resolve every address of the Complete Edition from the patterns. Fills `g` (addresses as virtual addresses for base 0x400000).
+static bool ResolveCEPatterns(GameAddrs& g)
+{
+    g = kCE;                      // hook lengths and prologue bytes: same build, same compiler
+    int fails = 0;
+    for (const Sig& sg : kCESigs) {
+        std::vector<uintptr_t> h = ScanModule(sg.pat);
+        if (h.empty()) { Log("pattern %-14s NOT FOUND", sg.name); fails++; continue; }
+        if (sg.unique && h.size() != 1) { Log("pattern %-14s ambiguous (%zu matches)", sg.name, h.size()); fails++; continue; }
+        uintptr_t val = sg.kind == 1 ? *(uintptr_t*)(h[0] + sg.off) : h[0] + sg.off;
+        uintptr_t va = val - g_base + 0x400000;
+        const std::string n = sg.name;
+        if (n == "CandidateAdd") g.CandidateAdd = va; else if (n == "TriRelease") g.TriRelease = va; else if (n == "TriNew") g.TriNew = va;
+        else if (n == "TriBuild") g.TriBuild = va; else if (n == "GBufferBuild") g.GBufferBuild = va; else if (n == "BoundGate") g.BoundGate = va;
+        else if (n == "Reset") g.Reset = va; else if (n == "ResetAll") g.ResetAll = va; else if (n == "EntDraw") g.EntDraw = va;
+        else if (n == "DcAppend") g.DcAppend = va; else if (n == "DcAlloc") g.DcAlloc = va; else if (n == "DcEntityCtor") g.DcEntityCtor = va;
+        else if (n == "DcIdCounter") g.DcIdCounter = va; else if (n == "ItemCount") { g.ItemCount = va; g.ItemTable = va + 4; }
+        else if (n == "PlantMgr") g.PlantMgr = va; else if (n == "ModelInfoTable") g.ModelInfoTable = va; else if (n == "CamPos") g.CamPos = va;
+        else if (n == "D3DDevicePtr") g.D3DDevicePtr = va; else if (n == "DetailDist") g.DetailDist = va; else if (n == "TriCapImm") g.TriCapImm = va;
+        else if (n == "Cave") g.Cave = va;
+    }
+    return fails == 0;
+}
+// fields that must agree between the pattern result and the known 1.2.0.59 table
+static int CompareToTable(const GameAddrs& a, const GameAddrs& t)
+{
+    int bad = 0;
+#define CMP(f) if (a.f != t.f) { Log("  pattern result differs from the table: %-14s %08x (table %08x)", #f, (unsigned)a.f, (unsigned)t.f); bad++; }
+    CMP(CandidateAdd) CMP(TriRelease) CMP(TriNew) CMP(TriBuild) CMP(TriCapImm) CMP(GBufferBuild) CMP(BoundGate) CMP(Reset) CMP(ResetAll) CMP(EntDraw)
+    CMP(DcAlloc) CMP(DcEntityCtor) CMP(DcIdCounter) CMP(ItemTable) CMP(ItemCount) CMP(PlantMgr) CMP(ModelInfoTable) CMP(CamPos) CMP(D3DDevicePtr) CMP(DetailDist) CMP(Cave)
+#undef CMP
+    return bad;
+}
 
 // ---------------------------------------------------------------- tiny inline hook
 static void* MakeHook(uintptr_t target, size_t len, void* detour)
@@ -1286,8 +1386,18 @@ static DWORD WINAPI InitThread(LPVOID)
                    (*(BYTE*)A(g.EntDraw) == 0x55 || *(BYTE*)A(g.EntDraw) == 0xE9) && *(BYTE*)A(g.TriRelease) != 0 ;
         };
         bool ok = false;
-        if (!IsBadReadPtr((void*)A(kCE.Reset), 8) && !IsBadReadPtr((void*)A(kCE.TriCapImm), 4) && matches(kCE)) { G = kCE; ok = true; }
-        else if (!IsBadReadPtr((void*)A(k1080.Reset), 8) && !IsBadReadPtr((void*)A(k1080.TriCapImm), 4) && matches(k1080)) { G = k1080; ok = true; }
+        auto readable = [&](const GameAddrs& g) { return !IsBadReadPtr((void*)A(g.Reset), 8) && !IsBadReadPtr((void*)A(g.TriCapImm), 4) && !IsBadReadPtr((void*)A(g.CandidateAdd), 4); };
+        if (readable(kCE) && matches(kCE)) {
+            G = kCE; ok = true;      // 1.2.0.59: known addresses; the pattern search runs too, as a self-test of the patterns
+            GameAddrs pr; bool pok = ResolveCEPatterns(pr); int bad = pok ? CompareToTable(pr, kCE) : -1;
+            Log("pattern self-test on 1.2.0.59: %s", !pok ? "some patterns were not found" : (bad == 0 ? "all patterns resolve to the table addresses" : "MISMATCH, see above"));
+        }
+        else if (readable(k1080) && matches(k1080)) { G = k1080; ok = true; }
+        else {      // another build of the Complete Edition (for example 1.2.0.43): find everything by pattern
+            GameAddrs pr;
+            if (ResolveCEPatterns(pr) && matches(pr)) { G = pr; G.name = "Complete Edition (found by patterns)"; ok = true; }
+            else Log("pattern search did not find a supported Complete Edition build");
+        }
         chk("executable", ok);
         if (!ok) { Log("unsupported executable (signature mismatch) - disabled"); return 0; }
         Log("detected game version: %s", G.name);
