@@ -28,7 +28,7 @@ Inspired by *SA Proper Shaders* (GTA SA). Works alongside FusionFix, DXVK and DL
 | Supported builds | 1.0.4.0 to Complete Edition 1.2.0.59 and VCNGE | 1.2.0.59 only |
 | Safety net | Hash check, startup validation, rollback | Signature check of the executable, disables itself on mismatch |
 
-In short: that mod makes the game's own system hold more; this one replaces how plants are drawn and fills in the grass the game never populated. If you only want more litter and props, or run another game build, use that mod. Both change the plant limits, so run one at a time unless you have tested the combination; they have not been tested together.
+In short: that mod makes the game's own system hold more; this one replaces how plants are drawn and fills in the grass the game never populated. In the author's tests, even with Various Fixes installed, some surfaces stay bare in vanilla and are only filled by Proper Grass, for example the garage lawn and sidewalk strip near Meadows Park and a lawn at a building in the Firefly projects. If you only want more litter and props, or run another game build, use that mod. Both change the plant limits, so run one at a time unless you have tested the combination; they have not been tested together.
 
 ## Requirements
 - GTA IV Complete Edition **1.2.0.59** (Steam). Other versions are not supported: the mod checks the executable and disables itself if it does not match.
