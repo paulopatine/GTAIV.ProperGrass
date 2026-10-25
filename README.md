@@ -45,6 +45,7 @@ Copy `GTAIV.ProperGrass.asi` and `ProperGrass.ini` into the `plugins` folder nex
 | `DrawDistance` | 0 | Fixed radius in metres (0 = use the formula above) |
 | `FadeWidth` | 12 | Metres over which plants grow in at the edge of the radius |
 | `DensityMultiplier` | 1.0 | Scales plant density |
+| `PlantScale` | 1.0 | Size of all plants, width and height (0.25 - 3.0) |
 | `TriCapacity` | 16384 | Active plant triangles |
 | `EdgeMargin` / `EdgeSoft` | 0.35 / 1.0 | Keeps plants away from the border of a grass area |
 | `FrustumCull` | 1 | Skip plants outside the camera view |

@@ -21,7 +21,7 @@
 static struct {
     int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0;
     float drawDistance = 0.f;      // 0 = use the game's plant radius
-    float densityMul = 1.f, radiusMul = 1.f, debugScale = 1.f;
+    float densityMul = 1.f, radiusMul = 1.f, plantScale = 1.f;
     float normalTilt = 0.f; float edgeMargin = 0.35f, edgeSoft = 1.0f, fadeWidth = 12.f;
     std::string grassMaterials = "GRASS@EXT_GRASS_DRYPLANTS_SHORT,SHORT_GRASS@EXT_GRASS_DRYPLANTS_SHORT,GRASS_PATCHY@EXT_GRASS_DRYPLANTS_SHORT,GRASS_LONG@EXT_GRASS_DRYPLANTS_LONG";
 } cfg;
@@ -218,7 +218,10 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
         if (n) { g_tableChecked = (n == g_items.size()) ? 1 : -1;
             if (g_tableChecked == 1) { std::string lst; for (size_t i = 0; i < g_items.size(); i++) { int tn = (int)*(uint32_t*)((uint8_t*)A(G::ItemTable) + i * 0x44); if (!g_tagNum.count(g_items[i].tag)) { g_tagNum[g_items[i].tag] = tn; lst += " " + std::to_string(tn) + "=" + g_items[i].tag; } } Log("tag numbers:%s", lst.c_str()); }
             Log("item table check: game=%u file=%zu -> %s", n, g_items.size(), g_tableChecked == 1 ? "OK" : "MISMATCH, instancing disabled");
-            if (g_tableChecked == 1 && cfg.densityMul != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* d = (float*)((uint8_t*)A(G::ItemTable) + i * 0x44 + 0xC); *d *= cfg.densityMul; cnt++; } Log("density x%.2f applied to %d vegetation items", cfg.densityMul, cnt); } }
+            if (g_tableChecked == 1 && cfg.densityMul != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* d = (float*)((uint8_t*)A(G::ItemTable) + i * 0x44 + 0xC); *d *= cfg.densityMul; cnt++; } Log("density x%.2f applied to %d vegetation items", cfg.densityMul, cnt); }
+            // plant size: scale the item table itself (min/max of width and height), so instanced plants and the few plants
+            // that stay ordinary game objects grow or shrink together
+            if (g_tableChecked == 1 && cfg.plantScale != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* f = (float*)((uint8_t*)A(G::ItemTable) + i * 0x44 + 0x1C); for (int k = 0; k < 4; k++) f[k] *= cfg.plantScale; cnt++; } Log("plant scale x%.2f applied to %d vegetation items", cfg.plantScale, cnt); } }
     }
     if (g_tableChecked == 1 && g_itemsValid && idx >= 0 && idx < (int)g_items.size() && g_items[idx].veg) {
         const uint8_t* it = (const uint8_t*)item;
@@ -236,8 +239,8 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
             Inst in;
             float rot = rotMin + Rnd(s) * (rotMax - rotMin);
             in.cs = cosf(rot); in.sn = sinf(rot);
-            in.sxy = (sclMin + Rnd(s) * (sclMax - sclMin)) * cfg.debugScale;
-            in.sz  = (szMin + Rnd(s) * (szMax - szMin)) * cfg.debugScale;
+            in.sxy = sclMin + Rnd(s) * (sclMax - sclMin);
+            in.sz  = szMin + Rnd(s) * (szMax - szMin);
             in.zoff = zoMin + Rnd(s) * (zoMax - zoMin);
             memcpy(in.pos, pos, 12); memcpy(in.nrm, nrm, 12);
             in.model = (uint16_t)model; in.align = it[0x34];
@@ -1207,6 +1210,8 @@ static DWORD WINAPI InitThread(LPVOID)
     cfg.debug = GetPrivateProfileIntA("Main", "Debug", 0, ini.c_str());
     char buf[32]; GetPrivateProfileStringA("Main", "DrawDistance", "0", buf, 32, ini.c_str()); cfg.drawDistance = (float)atof(buf);
     GetPrivateProfileStringA("Main", "DensityMultiplier", "1.0", buf, 32, ini.c_str()); cfg.densityMul = (float)atof(buf);
+    GetPrivateProfileStringA("Main", "PlantScale", "1.0", buf, 32, ini.c_str()); cfg.plantScale = (float)atof(buf);
+    if (!(cfg.plantScale >= 0.25f)) cfg.plantScale = cfg.plantScale > 0.f ? 0.25f : 1.f; if (cfg.plantScale > 3.f) cfg.plantScale = 3.f;
     cfg.grassTag = GetPrivateProfileIntA("Main", "GrassTag", 0, ini.c_str());
     GetPrivateProfileStringA("Main", "EdgeMargin", "0.35", buf, 32, ini.c_str()); cfg.edgeMargin = (float)atof(buf);
     GetPrivateProfileStringA("Main", "NormalTilt", "0", buf, 32, ini.c_str()); cfg.normalTilt = (float)atof(buf);
@@ -1220,7 +1225,7 @@ static DWORD WINAPI InitThread(LPVOID)
     GetPrivateProfileStringA("Main", "CullKey", "0", buf, 32, ini.c_str()); cfg.cullKey = (int)strtol(buf, nullptr, 0);
     GetPrivateProfileStringA("Main", "ToggleKey", "0", buf, 32, ini.c_str()); cfg.toggleKey = (int)strtol(buf, nullptr, 0);
     QueryPerformanceFrequency(&g_qpf);
-    Log("ProperGrass " PROPERGRASS_VERSION " starting (enabled=%d tri=%d maxInst=%d density=%.2f radius=%.2f)", cfg.enabled, cfg.triCapacity, cfg.maxInstances, cfg.densityMul, cfg.radiusMul);
+    Log("ProperGrass " PROPERGRASS_VERSION " starting (enabled=%d tri=%d maxInst=%d density=%.2f radius=%.2f scale=%.2f)", cfg.enabled, cfg.triCapacity, cfg.maxInstances, cfg.densityMul, cfg.radiusMul, cfg.plantScale);
     if (!cfg.enabled) return 0;
 
     // identity check
