@@ -1155,6 +1155,40 @@ static void InstallGrassHooks()
     if (*(BYTE*)A(0xC86540) == 0x55) oTriNew = (TriNew_t)MakeHook(A(0xC86540), 9, (void*)&hTriNew); else Log("tri-new prologue mismatch, edge culling off");
 }
 
+// ---------------------------------------------------------------- crash forensics
+// Logs fatal-type exceptions (access violation etc.) with module+offset, registers and a short return-address chain,
+// so a crash report says whether the fault is in the game, a driver layer or this mod. Does not alter handling.
+static void ModOff(const void* a, char* out, size_t n)
+{
+    HMODULE m = nullptr; char path[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m) && m) GetModuleFileNameA(m, path, MAX_PATH);
+    const char* b = strrchr(path, '\\'); b = b ? b + 1 : path;
+    snprintf(out, n, "%s+0x%x", b, (unsigned)((uintptr_t)a - (uintptr_t)m));
+}
+static LONG WINAPI VehLog(EXCEPTION_POINTERS* ep)
+{
+    const DWORD c = ep->ExceptionRecord->ExceptionCode;
+    if (c != EXCEPTION_ACCESS_VIOLATION && c != EXCEPTION_ILLEGAL_INSTRUCTION && c != EXCEPTION_STACK_OVERFLOW && c != EXCEPTION_INT_DIVIDE_BY_ZERO && c != EXCEPTION_PRIV_INSTRUCTION && c != EXCEPTION_IN_PAGE_ERROR) return EXCEPTION_CONTINUE_SEARCH;
+    static volatile LONG n = 0; static void* seen[64]; static thread_local bool busy = false;
+    if (busy || n >= 40) return EXCEPTION_CONTINUE_SEARCH;
+    void* a = ep->ExceptionRecord->ExceptionAddress;
+    for (int i = 0; i < 64 && i < n; i++) if (seen[i] == a) return EXCEPTION_CONTINUE_SEARCH;      // same fault site: log once
+    LONG k = InterlockedIncrement(&n) - 1; if (k < 64) seen[k] = a;
+    busy = true;
+    char where[160]; ModOff(a, where, sizeof where);
+    const CONTEXT* x = ep->ContextRecord;
+    Log("[exception] code=%08x at %s (eip=%08x) thread=%lu | mode=%d inRun=%d batchOn=%d frame=%ld", (unsigned)c, where, (unsigned)(uintptr_t)a, GetCurrentThreadId(), (int)g_mode, (int)g_inRun, (int)g_batch.on, (long)g_renderFrame);
+    if (c == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) Log("  access: %s address %08x", ep->ExceptionRecord->ExceptionInformation[0] == 1 ? "write" : (ep->ExceptionRecord->ExceptionInformation[0] == 8 ? "execute" : "read"), (unsigned)ep->ExceptionRecord->ExceptionInformation[1]);
+    Log("  eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x esp=%08x", (unsigned)x->Eax, (unsigned)x->Ebx, (unsigned)x->Ecx, (unsigned)x->Edx, (unsigned)x->Esi, (unsigned)x->Edi, (unsigned)x->Ebp, (unsigned)x->Esp);
+    uintptr_t bp = x->Ebp;
+    for (int i = 0; i < 10 && bp && !IsBadReadPtr((void*)bp, 8); i++) {       // ebp chain (frame-pointer code only; best effort)
+        uintptr_t ret = ((uintptr_t*)bp)[1]; char w[160]; ModOff((void*)ret, w, sizeof w); Log("  ret[%d] %08x %s", i, (unsigned)ret, w);
+        uintptr_t nb = ((uintptr_t*)bp)[0]; if (nb <= bp) break; bp = nb;
+    }
+    busy = false;
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static DWORD WINAPI InitThread(LPVOID)
 {
     g_base = (uintptr_t)GetModuleHandleA(NULL);
@@ -1163,6 +1197,7 @@ static DWORD WINAPI InitThread(LPVOID)
     std::string dir = path;
     g_log = fopen((dir + "\\plugins\\ProperGrass.log").c_str(), "w");
     std::string ini = dir + "\\plugins\\ProperGrass.ini";
+    AddVectoredExceptionHandler(1, VehLog);
     cfg.enabled = GetPrivateProfileIntA("Main", "Enabled", 1, ini.c_str());
     cfg.triCapacity = GetPrivateProfileIntA("Main", "TriCapacity", 16384, ini.c_str());
     cfg.maxInstances = GetPrivateProfileIntA("Main", "MaxInstances", 60000, ini.c_str());
