@@ -19,7 +19,7 @@
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0, grassMaterialFix = 1;
+    int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0, grassMaterialFix = 1, dumpProcedural = 0;
     float drawDistance = 0.f;      // 0 = use the game's plant radius
     float densityMul = 1.f, radiusMul = 1.f, plantScale = 1.f, slopeAlign = 1.f;
     float normalTilt = 0.f; float edgeMargin = 0.5f, edgeSoft = 1.0f, fadeWidth = 12.f;
@@ -306,6 +306,8 @@ static LONG g_failFrame[4096];
 static uint8_t g_mstate[4096];   // 0 unknown (game entities + probing), 1 instancing OK (candidates suppressed), 2 gave up
 static int g_mtries[4096];
 static int g_tableChecked = 0;   // 0 unknown, 1 ok, -1 mismatch
+static volatile LONG g_itemSeen[256], g_itemSupp[256];   // per procedural.dat item: candidates seen / suppressed (DumpProcedural)
+static void MaybeDumpProcedural();
 
 static inline uint32_t Hash32(uint32_t x) { x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; x ^= x >> 16; return x; }
 static inline float Rnd(uint32_t& s) { s = Hash32(s + 0x9e3779b9u); return (s & 0xFFFFFF) / 16777216.f; }
@@ -325,6 +327,7 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
 {
     InterlockedIncrement(&g_candCount);
     int idx = ItemIndex(item);
+    if (cfg.dumpProcedural) { if (idx >= 0 && idx < 256) InterlockedIncrement(&g_itemSeen[idx]); MaybeDumpProcedural(); }
     if (g_tableChecked == 0) {
         uint32_t n = *(uint32_t*)A(G.ItemCount);
         if (n) { g_tableChecked = (n == g_items.size()) ? 1 : -1;
@@ -343,6 +346,7 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
         static LONG s_pass[4096];
         bool doSupp = false; if (g_mode == 0 && model >= 0 && model < 4096 && g_mstate[model] != 2 && ModelResident(model)) { LONG pc = InterlockedIncrement(&s_pass[model]); doSupp = (pc & 31) != 0; /* 1 in 32 stays a real game entity: keeps the model referenced/streamed in */ }
         if (doSupp) {
+            if (idx < 256) InterlockedIncrement(&g_itemSupp[idx]);
             float rotMin = *(float*)(it + 0x14), rotMax = *(float*)(it + 0x18);
             float sclMin = *(float*)(it + 0x1C), sclMax = *(float*)(it + 0x20);
             float szMin  = *(float*)(it + 0x24), szMax  = *(float*)(it + 0x28);
@@ -1159,6 +1163,61 @@ static int GrassTagFor(int mat)
     LONG best = 0; int bt = 0; for (int t = 1; t < 256; t++) if (g_flagTag[mat][t] > best) { best = g_flagTag[mat][t]; bt = t; }
     return best >= 20 ? bt : 0;
 }
+// ---------------------------------------------------------------- procedural dump (DumpProcedural=1)
+// Writes ProperGrass.procedural.txt next to the plugin: every procedural.dat item the game loaded (tag, model, spacing, flags, size
+// ranges), how often the game asked for it and whether it is instanced, plus the collision material -> plant tag pairs seen in play.
+// Rewritten 20 s after the table is available and then every 60 s, so walk around different areas and open the last version.
+static std::string g_dumpPath; static volatile LONG g_dumpBusy; static DWORD g_dumpNext;
+static void WriteProceduralDump()
+{
+    FILE* f = fopen(g_dumpPath.c_str(), "w"); if (!f) return;
+    uint32_t n = *(uint32_t*)A(G.ItemCount);
+    fprintf(f, "# ProperGrass " PROPERGRASS_VERSION " procedural dump, game %s, uptime %lu s\n", G.name, (unsigned long)(GetTickCount() / 1000));
+    fprintf(f, "# items in game table: %u, parsed from procedural.dat: %zu, table check: %d\n", n, g_items.size(), g_tableChecked);
+    fprintf(f, "# columns: idx tagNum tag model(modelinfo index) name class spacing invDensity distGate2 align grid seed flags rot[min,max] scale[min,max] size[min,max] zoff[min,max] resident state seen suppressed draws\n");
+    fprintf(f, "# class: VEG = treated as vegetation by the mod (instanced); OTHER = left to the game (litter, props, ...)\n");
+    fprintf(f, "# state: 0 = game entities/probing, 1 = instancing OK, 2 = cannot be instanced; - = not a vegetation item\n\n");
+    std::unordered_map<int, std::string> tagName; for (auto& kv : g_tagNum) tagName[kv.second] = kv.first;
+    int veg = 0, other = 0; std::unordered_map<std::string, std::pair<int, int>> perTag;
+    for (uint32_t i = 0; i < n && i < 256; i++) {
+        const uint8_t* r = (const uint8_t*)A(G.ItemTable) + i * 0x44; if (IsBadReadPtr(r, 0x44)) break;
+        bool known = i < g_items.size() && g_tableChecked == 1;
+        const ItemInfo* it = known ? &g_items[i] : nullptr;
+        int tagNum = *(const int*)r, model = *(const int*)(r + 4);
+        const float* fl = (const float*)r;
+        bool isVeg = it && it->veg; if (isVeg) veg++; else other++;
+        std::string tg = it ? it->tag : (tagName.count(tagNum) ? tagName[tagNum] : "?");
+        auto& pt = perTag[tg]; if (isVeg) pt.first++; else pt.second++;
+        bool inRange = model >= 0 && model < 4096;
+        fprintf(f, "%3u %3d %-34s %5d %-26s %-5s sp=%.2f inv=%.4f d2=%.0f al=%u grid=%u seed=%u fl=%u rot[%.2f,%.2f] scl[%.2f,%.2f] sz[%.2f,%.2f] zo[%.2f,%.2f] res=%d st=%c seen=%ld supp=%ld draws=%d\n",
+            i, tagNum, tg.c_str(), model, it ? it->name : "?", isVeg ? "VEG" : "OTHER", fl[2], fl[3], fl[4], r[0x34], r[0x35], r[0x36], r[0x37],
+            fl[5], fl[6], fl[7], fl[8], fl[9], fl[10], fl[11], fl[12], inRange && ModelResident(model) ? 1 : 0,
+            isVeg && inRange ? '0' + g_mstate[model] : '-', (long)g_itemSeen[i & 255], (long)g_itemSupp[i & 255], isVeg && inRange ? g_frameDraws[model] : 0);
+    }
+    fprintf(f, "\n# summary: %d VEG, %d OTHER items\n# per tag (VEG/OTHER):", veg, other);
+    for (auto& kv : perTag) fprintf(f, " %s=%d/%d", kv.first.c_str(), kv.second.first, kv.second.second);
+    fprintf(f, "\n\n# collision material -> plant tag, as stored in the game's polygons (only materials seen so far)\n");
+    for (int m = 0; m < 256; m++) {
+        std::string row; long total = 0;
+        for (int t = 1; t < 256; t++) if (g_flagTag[m][t] > 0) { char b[96]; const std::string& nm = tagName.count(t) ? tagName[t] : std::string("tag") + std::to_string(t); sprintf(b, " %s(%d)=%ld", nm.c_str(), t, (long)g_flagTag[m][t]); row += b; total += g_flagTag[m][t]; }
+        if (!total && !g_grassMat[m]) continue;
+        fprintf(f, "%3d %-26s%s%s\n", m, m < (int)g_matNames.size() ? g_matNames[m].c_str() : "?", g_grassMat[m] ? " [mod grass material]" : "", row.empty() ? " (no tag seen)" : row.c_str());
+    }
+    fclose(f);
+}
+static void MaybeDumpProcedural()
+{
+    if (g_tableChecked != 1 || g_dumpPath.empty()) return;
+    DWORD now = GetTickCount();
+    if (!g_dumpNext) { g_dumpNext = now + 20000; return; }
+    if ((LONG)(now - g_dumpNext) < 0) return;
+    if (InterlockedExchange(&g_dumpBusy, 1)) return;
+    g_dumpNext = now + 60000;
+    WriteProceduralDump();
+    Log("procedural dump written: %s", g_dumpPath.c_str());
+    InterlockedExchange(&g_dumpBusy, 0);
+}
+
 static inline void Words(void* bound, uint32_t poly, uint32_t* w)
 {
     BoundFn1 f0 = *(BoundFn1*)(*(uintptr_t*)bound + 0xD4);
@@ -1368,6 +1427,8 @@ static DWORD WINAPI InitThread(LPVOID)
     { char b[512]; GetPrivateProfileStringA("Main", "GrassMaterials", cfg.grassMaterials.c_str(), b, sizeof b, ini.c_str()); cfg.grassMaterials = b;
     }
     GetPrivateProfileStringA("Main", "RadiusMultiplier", "1.5", buf, 32, ini.c_str()); cfg.radiusMul = (float)atof(buf);
+    cfg.dumpProcedural = GetPrivateProfileIntA("Main", "DumpProcedural", 0, ini.c_str());
+    if (cfg.dumpProcedural) g_dumpPath = modDir + "\\ProperGrass.procedural.txt";
     cfg.profile = GetPrivateProfileIntA("Main", "Profile", 0, ini.c_str());
     cfg.frustumCull = GetPrivateProfileIntA("Main", "FrustumCull", 1, ini.c_str());
     GetPrivateProfileStringA("Main", "CullKey", "0", buf, 32, ini.c_str()); cfg.cullKey = (int)strtol(buf, nullptr, 0);
