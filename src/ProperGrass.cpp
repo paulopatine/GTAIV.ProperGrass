@@ -782,7 +782,10 @@ static bool UploadInstances(const float* data, UINT count)
     return true;
 }
 
-static uint8_t g_bucketMask[4096];      // buckets in which a model has ever drawn (a model usually has meshes in one bucket only)
+static uint8_t g_bucketMask[4096];      // buckets in which a model has drawn
+static uint8_t g_emptyMask[4096];       // buckets tried that drew nothing (re-checked every 64 frames)
+// Note: models with meshes in two buckets (e.g. leaves cutout + flower opaque) must draw in BOTH every frame. The old
+// scheme cleared the masks every 600 frames and then throttled the second bucket, so one part of such plants blinked.
 static int g_frameDraws[4096]; static volatile LONG g_lastDraws = 0, g_lastDrawFrames = 0;
 static void RunGroups(Packet* pk, int bucket)
 {
@@ -792,12 +795,12 @@ static void RunGroups(Packet* pk, int bucket)
     for (size_t gi = 0; gi < pk->groups.size(); gi++) {
         const Group& g = pk->groups[gi];
         if (g_mstate[g.model & 4095] != 1) continue;
-        const uint8_t mk = g_bucketMask[g.model & 4095]; const bool lite = mk && !(mk & (1u << bucket));      // bucket where the model has not drawn so far: one cheap attempt only
+        const uint8_t bit = (uint8_t)(1u << bucket); const bool lite = (g_emptyMask[g.model & 4095] & bit) && !(g_bucketMask[g.model & 4095] & bit);      // bucket known to hold no mesh of this model: cheap re-check only
         if (lite && g_goodDir >= 0) {      // only every 64th frame: uploading and drawing for a bucket the model has no meshes in is wasted work
             if (((g_renderFrame + g.model) & 63) != 0) continue;
             if (!UploadInstances(&pk->data[(size_t)g.first * 16], g.count)) { g_dbgUploadFail++; return; }
             int dr = SampleAttempt(g.model, g_goodDir, bucket, g_goodDist);
-            if (dr > 0) { g_frameDraws[g.model & 4095] += dr; g_bucketMask[g.model & 4095] |= (uint8_t)(1u << bucket); }
+            if (dr > 0) { g_frameDraws[g.model & 4095] += dr; g_bucketMask[g.model & 4095] |= bit; g_emptyMask[g.model & 4095] &= (uint8_t)~bit; }
             continue;
         }
         if (!UploadInstances(&pk->data[(size_t)g.first * 16], g.count)) { g_dbgUploadFail++; return; }
@@ -808,7 +811,8 @@ static void RunGroups(Packet* pk, int bucket)
             for (int k = 0; k < 5 && draws <= 0; k++) { float d = k == 0 ? gd : dists[k - 1 < 0 ? 0 : k - 1]; if (k > 0 && d == gd) continue; draws = SampleAttempt(g.model, order[0], bucket, d); if (draws > 0) g_goodDist = d; (void)first; }
         }
         for (int a = 0; a < n && draws <= 0; a++) { draws = SampleAttempt(g.model, order[a], bucket); if (draws > 0 && g_goodDir != order[a]) { g_goodDir = order[a]; g_goodDirPub = g_goodDir; Log("sample direction re-calibrated to %d", g_goodDir); } }
-        if (draws > 0) { g_frameDraws[g.model & 4095] += draws; g_bucketMask[g.model & 4095] |= (uint8_t)(1u << bucket); }
+        if (draws > 0) { g_frameDraws[g.model & 4095] += draws; g_bucketMask[g.model & 4095] |= bit; g_emptyMask[g.model & 4095] &= (uint8_t)~bit; }
+        else if (draws == 0 && !(g_bucketMask[g.model & 4095] & bit)) g_emptyMask[g.model & 4095] |= bit;
         else if (draws < 0) { g_mstate[g.model & 4095] = 2; g_failFrame[g.model & 4095] = (LONG)g_renderFrame; Log("model %d (%s): a mesh cannot be instanced -> back to game entities", g.model, g_mname[g.model & 4095]); continue; }
         if (logged < 30 && draws > 0) { logged++; Log("run: bucket=%d model=%d count=%u draws=%d goodDir=%d", bucket, g.model, g.count, draws, g_goodDir); }
     }
@@ -949,7 +953,6 @@ static void __fastcall CbDraw(CbDc* dc, void*)
         if (cfg.profile && EnsureDevice()) PerfFrame();
         memset(g_frameDraws, 0, sizeof g_frameDraws);
         g_ranMask = 0; g_curPacket = dc->pk; g_renderFrame++;
-        if ((g_renderFrame % 600) == 0) memset(g_bucketMask, 0, sizeof g_bucketMask);     // relearn, a model may have meshes in several buckets
     }
 }
 
