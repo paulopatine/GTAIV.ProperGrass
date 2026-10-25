@@ -19,7 +19,7 @@
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0;
+    int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0, grassMaterialFix = 1;
     float drawDistance = 0.f;      // 0 = use the game's plant radius
     float densityMul = 1.f, radiusMul = 1.f, plantScale = 1.f, slopeAlign = 1.f;
     float normalTilt = 0.f; float edgeMargin = 0.35f, edgeSoft = 1.0f, fadeWidth = 12.f;
@@ -1159,8 +1159,10 @@ static void InstallGrassHooks()
         p = q + 1;
     }
     if (*(BYTE*)A(0xC86C80) != 0x53 || *(BYTE*)A(0xC87F40) != 0x55) { Log("grass hooks: unexpected prologue, not installed"); return; }
-    oBoundGate = (BoundGate_t)MakeHook(A(0xC86C80), 8, (void*)&hBoundGate);
-    oTriBuild = (TriBuild_t)MakeHook(A(0xC87F40), 12, (void*)&hTriBuild);
+    if (cfg.grassMaterialFix) {      // give the listed grass materials a plant tag (off: leave the game's tags alone, e.g. when another mod fixes them)
+        oBoundGate = (BoundGate_t)MakeHook(A(0xC86C80), 8, (void*)&hBoundGate);
+        oTriBuild = (TriBuild_t)MakeHook(A(0xC87F40), 12, (void*)&hTriBuild);
+    } else Log("GrassMaterialFix=0: grass materials keep the game's own plant tags (edge culling still uses the list)");
     if (*(BYTE*)A(0xC86540) == 0x55) oTriNew = (TriNew_t)MakeHook(A(0xC86540), 9, (void*)&hTriNew); else Log("tri-new prologue mismatch, edge culling off");
 }
 
@@ -1214,6 +1216,7 @@ static DWORD WINAPI InitThread(LPVOID)
     char buf[32]; GetPrivateProfileStringA("Main", "DrawDistance", "0", buf, 32, ini.c_str()); cfg.drawDistance = (float)atof(buf);
     GetPrivateProfileStringA("Main", "DensityMultiplier", "1.0", buf, 32, ini.c_str()); cfg.densityMul = (float)atof(buf);
     GetPrivateProfileStringA("Main", "PlantScale", "1.0", buf, 32, ini.c_str()); cfg.plantScale = (float)atof(buf);
+    cfg.grassMaterialFix = GetPrivateProfileIntA("Main", "GrassMaterialFix", 1, ini.c_str());
     GetPrivateProfileStringA("Main", "SlopeAlign", "1", buf, 32, ini.c_str()); cfg.slopeAlign = (float)atof(buf);
     if (!(cfg.slopeAlign >= 0.f)) cfg.slopeAlign = 0.f; if (cfg.slopeAlign > 1.f) cfg.slopeAlign = 1.f;
     if (!(cfg.plantScale >= 0.25f)) cfg.plantScale = cfg.plantScale > 0.f ? 0.25f : 1.f; if (cfg.plantScale > 3.f) cfg.plantScale = 3.f;
@@ -1253,7 +1256,7 @@ static DWORD WINAPI InitThread(LPVOID)
     // raise the active-triangle capacity (must happen before the manager initialises)
     { DWORD old; BYTE* p = (BYTE*)A(G::TriCapImm); VirtualProtect(p, 4, PAGE_EXECUTE_READWRITE, &old); *(uint32_t*)p = (uint32_t)cfg.triCapacity; VirtualProtect(p, 4, old, &old); }
 
-    InstallGrassCave();
+    if (cfg.grassMaterialFix) InstallGrassCave();
     InstallGrassHooks();
     oCandAdd = (CandAddFn)MakeHook(A(G::CandidateAdd), 8, (void*)&hCandAdd);
     oTriRelease = (TriReleaseFn)MakeHook(A(G::TriRelease), 7, (void*)&hTriRelease);

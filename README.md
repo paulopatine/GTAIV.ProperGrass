@@ -51,7 +51,8 @@ Copy `GTAIV.ProperGrass.asi` and `ProperGrass.ini` into the `plugins` folder nex
 | `TriCapacity` | 16384 | Active plant triangles |
 | `EdgeMargin` / `EdgeSoft` | 0.35 / 1.0 | Keeps plants away from the border of a grass area |
 | `FrustumCull` | 1 | Skip plants outside the camera view |
-| `GrassMaterials` | see file | `NAME@TAG` list of materials that receive plants |
+| `GrassMaterialFix` | 1 | Give plants to grass surfaces the game ships without any. Set 0 if another mod (e.g. Various Fixes) already fixes them |
+| `GrassMaterials` | see file | `NAME@TAG` list of grass materials (plants for them, and edge handling) |
 
 Diagnostics: `Debug=1` writes extra detail to `ProperGrass.log`. `Profile=1` shows an on-screen performance panel;
 with `ToggleKey=0x76` (F7) you can switch live between **MOD**, **VANILLA** and **NO-INSTANCING**, and `CullKey=0x77` (F8) toggles culling.
