@@ -22,7 +22,7 @@ static struct {
     int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0, grassMaterialFix = 1;
     float drawDistance = 0.f;      // 0 = use the game's plant radius
     float densityMul = 1.f, radiusMul = 1.f, plantScale = 1.f, slopeAlign = 1.f;
-    float normalTilt = 0.f; float edgeMargin = 0.35f, edgeSoft = 1.0f, fadeWidth = 12.f;
+    float normalTilt = 0.f; float edgeMargin = 0.5f, edgeSoft = 1.0f, fadeWidth = 12.f;
     std::string grassMaterials = "GRASS@EXT_GRASS_DRYPLANTS_SHORT,SHORT_GRASS@EXT_GRASS_DRYPLANTS_SHORT,GRASS_PATCHY@EXT_GRASS_DRYPLANTS_SHORT,GRASS_LONG@EXT_GRASS_DRYPLANTS_LONG";
 } cfg;
 static FILE* g_log;
@@ -1361,7 +1361,7 @@ static DWORD WINAPI InitThread(LPVOID)
     if (!(cfg.slopeAlign >= 0.f)) cfg.slopeAlign = 0.f; if (cfg.slopeAlign > 1.f) cfg.slopeAlign = 1.f;
     if (!(cfg.plantScale >= 0.25f)) cfg.plantScale = cfg.plantScale > 0.f ? 0.25f : 1.f; if (cfg.plantScale > 3.f) cfg.plantScale = 3.f;
     cfg.grassTag = GetPrivateProfileIntA("Main", "GrassTag", 0, ini.c_str());
-    GetPrivateProfileStringA("Main", "EdgeMargin", "0.35", buf, 32, ini.c_str()); cfg.edgeMargin = (float)atof(buf);
+    GetPrivateProfileStringA("Main", "EdgeMargin", "0.5", buf, 32, ini.c_str()); cfg.edgeMargin = (float)atof(buf);
     GetPrivateProfileStringA("Main", "NormalTilt", "0", buf, 32, ini.c_str()); cfg.normalTilt = (float)atof(buf);
     GetPrivateProfileStringA("Main", "EdgeSoft", "1.0", buf, 32, ini.c_str()); cfg.edgeSoft = (float)atof(buf);
     GetPrivateProfileStringA("Main", "FadeWidth", "12", buf, 32, ini.c_str()); cfg.fadeWidth = (float)atof(buf);

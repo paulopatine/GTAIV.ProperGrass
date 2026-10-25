@@ -48,7 +48,7 @@ Copy `GTAIV.ProperGrass.asi` and `ProperGrass.ini` into the `plugins` folder nex
 | `PlantScale` | 1.0 | Size of all plants, width and height (0.25 - 3.0) |
 | `SlopeAlign` | 1 | How much plants follow the slope: 1 = perpendicular to the ground, 0 = straight up like vanilla |
 | `TriCapacity` | 16384 | Active plant triangles |
-| `EdgeMargin` / `EdgeSoft` | 0.35 / 1.0 | Keeps plants away from the border of a grass area |
+| `EdgeMargin` / `EdgeSoft` | 0.5 / 1.0 | Keeps plants away from the border of a grass area |
 | `FrustumCull` | 1 | Skip plants outside the camera view |
 | `GrassMaterialFix` | 1 | Give plants to grass surfaces the game ships without any. Set 0 if another mod (e.g. Various Fixes) already fixes them |
 | `GrassMaterials` | see file | `NAME@TAG` list of grass materials (plants for them, and edge handling) |
