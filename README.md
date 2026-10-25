@@ -1,6 +1,6 @@
 # GTA IV Proper Grass
 
-GPU-instanced procedural vegetation for **Grand Theft Auto IV (1.2.0.59, Complete Edition)**.
+GPU-instanced procedural vegetation for **Grand Theft Auto IV** (**1.2.0.59** Complete Edition and **1.0.8.0**).
 It fixes the game's long-standing grass problem: many grass surfaces never get plants, and the ones that do run out of
 plant objects, pop in and vanish at some camera angles. The mod keeps the game's own plants and its own look, but draws them
 with hardware instancing, so a far denser, longer-reaching lawn costs a handful of draw calls.
@@ -31,13 +31,12 @@ Inspired by *SA Proper Shaders* (GTA SA). Works alongside FusionFix, DXVK and DL
 In short: that mod makes the game's own system hold more; this one replaces how plants are drawn and fills in the grass the game never populated. In the author's tests, even with Various Fixes installed, some surfaces stay bare in vanilla and are only filled by Proper Grass, for example the garage lawn and sidewalk strip near Meadows Park and a lawn at a building in the Firefly projects. If you only want more litter and props, or run another game build, use that mod. Both change the plant limits, so run one at a time unless you have tested the combination; they have not been tested together.
 
 ## Requirements
-- GTA IV Complete Edition **1.2.0.59** (Steam). Other versions are not supported: the mod checks the executable and disables itself if it does not match.
+- GTA IV **1.2.0.59** (Complete Edition, Steam) or **1.0.8.0**. The mod recognises the executable and picks the right game addresses; any other version is not supported and the mod disables itself.
 - An ASI loader ([FusionFix](https://github.com/ThirteenAG/GTAIV.EFLC.FusionFix) includes one).
 - `d3dx9_43.dll` (installed by the DirectX redistributable that ships with the game).
 
 ## Install
-Copy `GTAIV.ProperGrass.asi` and `ProperGrass.ini` into the `plugins` folder next to `GTAIV.exe`
-(or wherever your ASI loader reads plugins from). Uninstall by deleting both files.
+Copy `GTAIV.ProperGrass.asi` and `ProperGrass.ini` into the `plugins` folder next to `GTAIV.exe`, or next to `GTAIV.exe` itself if that is where your other ASI plugins live. Keep both files together: the INI and the log (`ProperGrass.log`) are read from and written to the folder of the `.asi`. Uninstall by deleting both files.
 
 ## Settings (`ProperGrass.ini`)
 | Key | Default | Meaning |
@@ -71,7 +70,7 @@ The mod costs roughly 0.2-0.4 ms on the main thread, under 0.1 ms on the render 
 - The airport-highway median has concrete collision under its grass, so it stays bare.
 - A few plant models cannot be instanced and remain ordinary game objects.
 - Grass looks as glossy under car headlights as in vanilla; custom lighting is not part of this release.
-- Only 1.2.0.59 is supported.
+- Only 1.2.0.59 and 1.0.8.0 are supported.
 
 ## Build
 ```

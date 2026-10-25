@@ -51,24 +51,33 @@ static char g_ovl[2][256]; static std::mutex g_ovlMx;
 static LONGLONG g_tRun = 0; static LONG g_dipAll = 0, g_dipOurs = 0; static LONGLONG g_instDrawn = 0;
 
 // ---------------------------------------------------------------- game addresses (1.2.0.59)
-namespace G {
-    constexpr uintptr_t CandidateAdd   = 0xC093A0; // thiscall(mgr, pos*, nrm*, item*, tri*)
-    constexpr uintptr_t TriRelease     = 0xC87010; // fastcall(tri)
-    constexpr uintptr_t TriInit        = 0xC86540; // thiscall(tri,...) (recycles a tri slot)
-    constexpr uintptr_t TriCapImm      = 0xC86C31; // imm32 = 0x200
-    constexpr uintptr_t GBufferBuild   = 0xD685F0; // CRenderPhaseDeferredLighting_SceneToGBuffer::BuildRenderList
-    constexpr uintptr_t DcAppend       = 0x5C08F0; // CBaseDC::Append (thiscall)
-    constexpr uintptr_t DcAlloc        = 0x8DC3A0; // cdecl(size, 0)
-    constexpr uintptr_t DcEntityCtor   = 0x8DACA0; // thiscall(model,b32,b33,b34,mtx*,b35,b36) ret 0x1c
-    constexpr uintptr_t DcIdCounter    = 0x10327A0;
-    constexpr uintptr_t ItemTable      = 0x16C8FB8; // procobj item table, stride 0x44
-    constexpr uintptr_t ItemCount      = 0x16C8FB4;
-    constexpr uintptr_t PlantMgr       = 0x16FB6A0;
-    constexpr uintptr_t ModelInfoTable = 0x1295CD8;
-    constexpr uintptr_t CamPos         = 0x128E340; // float x,y,z
-    constexpr uintptr_t D3DDevicePtr   = 0x17ED8D8;
-    constexpr uintptr_t DcVtableEntity = 0xE81878;
-}
+// Game addresses per executable version. Filled by DetectVersion() once; all are virtual addresses for image base 0x400000.
+struct GameAddrs {
+    const char* name = "";
+    bool v1080 = false;          // 1.0.8.0 (x87 build) vs 1.2.0.59 Complete Edition (SSE build)
+    uintptr_t CandidateAdd, TriRelease, TriNew, TriBuild, TriCapImm, GBufferBuild, BoundGate, Reset, ResetAll, EntDraw;
+    uintptr_t DcAppend, DcAlloc, DcEntityCtor, DcIdCounter;
+    uintptr_t ItemTable, ItemCount, PlantMgr, ModelInfoTable, CamPos, D3DDevicePtr, DetailDist, AddRef;
+    uintptr_t BoundAttach;       // 1.0.8.0: where the per-polygon plant bits are built
+    uintptr_t Cave;              // 1.2.0.59: patch point in the polygon scan
+    uint8_t   bgByte, tbByte, tnByte;    // first bytes of BoundGate / TriBuild / TriNew (sanity check)
+    int lenCand, lenRel, lenNew, lenGate, lenBuild, lenReset, lenGBuild, lenEnt, lenAttach;
+    uintptr_t CamRows() const { return CamPos - 0x30; }     // 4x4 camera matrix: right, forward, up, position
+} G;
+static const GameAddrs kCE = { "1.2.0.59 Complete Edition", false,
+    0xC093A0, 0xC87010, 0xC86540, 0xC87F40, 0xC86C31, 0xD685F0, 0xC86C80, 0xC87450, 0xC874C0, 0x8DCBF0,
+    0x5C08F0, 0x8DC3A0, 0x8DACA0, 0x10327A0,
+    0x16C8FB8, 0x16C8FB4, 0x16FB6A0, 0x1295CD8, 0x128E340, 0x17ED8D8, 0x103F714, 0xB59F20,
+    0, 0xC87E27,
+    0x53, 0x55, 0x55,
+    8, 7, 9, 8, 12, 5, 11, 6, 0 };
+static const GameAddrs k1080 = { "1.0.8.0", true,
+    0x9F91D0, 0xC16660, 0xC169F0, 0xC16CB0, 0xC17DCC, 0xCA3290, 0xC16170, 0xC173C0, 0xC16C50, 0x860170,
+    0x475920, 0x85E390, 0x8600D0, 0xF35058,
+    0x1420EB0, 0x1420EAC, 0x16ABCD0, 0x122C168, 0x11CAEF0, 0x1745630, 0xF42920, 0xA3C360,
+    0xC16770, 0,
+    0x53, 0x55, 0x55,
+    6, 6, 6, 5, 6, 5, 11, 6, 7 };
 static uintptr_t g_base;
 static inline uintptr_t A(uintptr_t va) { return va - 0x400000 + g_base; }
 
@@ -129,7 +138,7 @@ static void ParseProcedural(const char* path)
     fclose(f);
     g_items.clear();
     for (auto& t : tagOrder) for (auto& it : byTag[t]) g_items.push_back(it);
-    uint32_t cnt = *(uint32_t*)A(G::ItemCount);
+    uint32_t cnt = *(uint32_t*)A(G.ItemCount);
     int veg = 0; for (auto& i : g_items) veg += i.veg;
     Log("procedural.dat: %zu items parsed (table has %u), %d vegetation items", g_items.size(), cnt, veg);
     g_itemsValid = true;
@@ -137,7 +146,7 @@ static void ParseProcedural(const char* path)
 
 static inline int ItemIndex(const void* item)
 {
-    intptr_t d = (intptr_t)item - (intptr_t)A(G::ItemTable);
+    intptr_t d = (intptr_t)item - (intptr_t)A(G.ItemTable);
     if (d < 0 || d % 0x44) return -1;
     return (int)(d / 0x44);
 }
@@ -186,7 +195,7 @@ static bool g_vegSeen[4096];
 static bool Rd(uintptr_t p, uintptr_t* o) { if (!p || IsBadReadPtr((void*)p, 4)) return false; *o = *(uintptr_t*)p; return true; }
 static bool ModelResident(int m) {
     uintptr_t mi, a, p;
-    if (!Rd(A(0x1295CD8) + m * 4, &mi) || !mi) return false;
+    if (!Rd(A(G.ModelInfoTable) + m * 4, &mi) || !mi) return false;
     if (!Rd(mi + 8, &a)) return false;
     if (a == 0) { uintptr_t q; if (!Rd(mi + 0xC, &q) || !q) return false; return Rd(q, &p) && p != 0; }
     return Rd(a + 0xB4, &p) && p != 0;
@@ -217,14 +226,14 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
     InterlockedIncrement(&g_candCount);
     int idx = ItemIndex(item);
     if (g_tableChecked == 0) {
-        uint32_t n = *(uint32_t*)A(G::ItemCount);
+        uint32_t n = *(uint32_t*)A(G.ItemCount);
         if (n) { g_tableChecked = (n == g_items.size()) ? 1 : -1;
-            if (g_tableChecked == 1) { std::string lst; for (size_t i = 0; i < g_items.size(); i++) { int tn = (int)*(uint32_t*)((uint8_t*)A(G::ItemTable) + i * 0x44); if (!g_tagNum.count(g_items[i].tag)) { g_tagNum[g_items[i].tag] = tn; lst += " " + std::to_string(tn) + "=" + g_items[i].tag; } } Log("tag numbers:%s", lst.c_str()); }
+            if (g_tableChecked == 1) { std::string lst; for (size_t i = 0; i < g_items.size(); i++) { int tn = (int)*(uint32_t*)((uint8_t*)A(G.ItemTable) + i * 0x44); if (!g_tagNum.count(g_items[i].tag)) { g_tagNum[g_items[i].tag] = tn; lst += " " + std::to_string(tn) + "=" + g_items[i].tag; } } Log("tag numbers:%s", lst.c_str()); }
             Log("item table check: game=%u file=%zu -> %s", n, g_items.size(), g_tableChecked == 1 ? "OK" : "MISMATCH, instancing disabled");
-            if (g_tableChecked == 1 && cfg.densityMul != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* d = (float*)((uint8_t*)A(G::ItemTable) + i * 0x44 + 0xC); *d *= cfg.densityMul; cnt++; } Log("density x%.2f applied to %d vegetation items", cfg.densityMul, cnt); }
+            if (g_tableChecked == 1 && cfg.densityMul != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* d = (float*)((uint8_t*)A(G.ItemTable) + i * 0x44 + 0xC); *d *= cfg.densityMul; cnt++; } Log("density x%.2f applied to %d vegetation items", cfg.densityMul, cnt); }
             // plant size: scale the item table itself (min/max of width and height), so instanced plants and the few plants
             // that stay ordinary game objects grow or shrink together
-            if (g_tableChecked == 1 && cfg.plantScale != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* f = (float*)((uint8_t*)A(G::ItemTable) + i * 0x44 + 0x1C); for (int k = 0; k < 4; k++) f[k] *= cfg.plantScale; cnt++; } Log("plant scale x%.2f applied to %d vegetation items", cfg.plantScale, cnt); } }
+            if (g_tableChecked == 1 && cfg.plantScale != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* f = (float*)((uint8_t*)A(G.ItemTable) + i * 0x44 + 0x1C); for (int k = 0; k < 4; k++) f[k] *= cfg.plantScale; cnt++; } Log("plant scale x%.2f applied to %d vegetation items", cfg.plantScale, cnt); } }
     }
     if (g_tableChecked == 1 && g_itemsValid && idx >= 0 && idx < (int)g_items.size() && g_items[idx].veg) {
         const uint8_t* it = (const uint8_t*)item;
@@ -443,7 +452,7 @@ static HRESULT STDMETHODCALLTYPE hDIP(IDirect3DDevice9* d, D3DPRIMITIVETYPE pt, 
     IDirect3DVertexShader9* pvs = vs ? GetPatchedVS(vs) : nullptr;
     IDirect3DVertexDeclaration9* pdecl = decl ? GetInstDecl(decl) : nullptr;
     if (cfg.debug) {      // which meshes/shaders does the sample draw issue, and how does that depend on the view?
-        static int nl = 0; static float lastPitch = 9; const float* rr = (const float*)A(0x128E310);
+        static int nl = 0; static float lastPitch = 9; const float* rr = (const float*)A(G.CamRows());
         bool steep = rr[6] < -0.5f; static bool lastSteep = false; if (steep != lastSteep) { lastSteep = steep; nl = 0; }
         if (nl < 40) { nl++; uint32_t h = 2166136261u; UINT sz2 = 0; if (vs && SUCCEEDED(vs->GetFunction(nullptr, &sz2)) && sz2) { std::vector<uint8_t> cc(sz2); vs->GetFunction(cc.data(), &sz2); for (UINT i = 0; i < sz2; i++) { h ^= cc[i]; h *= 16777619u; } }
             IDirect3DPixelShader9* ps = nullptr; d->GetPixelShader(&ps); uint32_t ph = 2166136261u; UINT psz = 0; if (ps && SUCCEEDED(ps->GetFunction(nullptr, &psz)) && psz) { std::vector<uint8_t> cc(psz); ps->GetFunction(cc.data(), &psz); for (UINT i = 0; i < psz; i++) { ph ^= cc[i]; ph *= 16777619u; } } if (ps) ps->Release();
@@ -565,7 +574,7 @@ static bool PatchVtable(int idx, void* fn)
 static bool EnsureDevice()
 {
     if (g_dev) return true;
-    IDirect3DDevice9* d = *(IDirect3DDevice9**)A(G::D3DDevicePtr);
+    IDirect3DDevice9* d = *(IDirect3DDevice9**)A(G.D3DDevicePtr);
     if (!d || IsBadReadPtr(d, 4)) return false;
     g_dev = d;
     { IDirect3DSurface9* bb = nullptr; D3DSURFACE_DESC bd = {}; if (SUCCEEDED(d->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb) { bb->GetDesc(&bd); bb->Release(); if (bd.Height) g_aspect = (float)bd.Width / bd.Height; } }
@@ -597,10 +606,10 @@ static void BuildPacket(Packet& pk)
 {
     pk.groups.clear(); pk.data.clear();
     memset(g_preCnt, 0, sizeof g_preCnt); memset(g_fSum, 0, sizeof g_fSum);
-    const float* cam = (const float*)A(G::CamPos);
-    const float* fwd = (const float*)A(0x128E320);
+    const float* cam = (const float*)A(G.CamPos);
+    const float* fwd = (const float*)A(G.CamRows() + 0x10);
     for (int i = 0; i < 3; i++) pk.samplePos[i] = cam[i] + fwd[i] * 4.0f;
-    float R = cfg.drawDistance > 0 ? cfg.drawDistance : *(float*)(A(G::PlantMgr) + 0x14);
+    float R = cfg.drawDistance > 0 ? cfg.drawDistance : *(float*)(A(G.PlantMgr) + 0x14);
     if (R < 10.f) R = 10.f;
     float R2 = R * R;
     float fw = cfg.fadeWidth; if (fw > R * 0.6f) fw = R * 0.6f;
@@ -613,8 +622,8 @@ static void BuildPacket(Packet& pk)
     used.clear();
     std::lock_guard<std::mutex> l(g_instMx);
     size_t total = 0;
-    const uintptr_t arrBase = *(uint32_t*)(A(G::PlantMgr) + 0xF30);
-    const uintptr_t arrEnd = arrBase + (uintptr_t)(*(uint32_t*)(A(G::PlantMgr) + 0x18)) * 0x60;
+    const uintptr_t arrBase = *(uint32_t*)(A(G.PlantMgr) + 0xF30);
+    const uintptr_t arrEnd = arrBase + (uintptr_t)(*(uint32_t*)(A(G.PlantMgr) + 0x18)) * 0x60;
         for (auto it = g_byTri.begin(); it != g_byTri.end();) {
         const uint8_t* tri = (const uint8_t*)it->first;
         if (!arrBase || it->first < arrBase || it->first >= arrEnd || !(tri[0x55] & 4)) { it = g_byTri.erase(it); continue; }      // slot no longer in "spawned" state
@@ -680,7 +689,7 @@ static void BuildPacket(Packet& pk)
     }
     for (int m : used) {
         auto& b = bucket[m];
-        const uint8_t* mi = *(const uint8_t**)A(G::ModelInfoTable + 4 * m);
+        const uint8_t* mi = *(const uint8_t**)A(G.ModelInfoTable + 4 * m);
         float minZ = mi ? *(const float*)(mi + 0x28) : 0.f;
         if (cfg.debug && g_logFrames < 3) Log("model %d: modelinfo=%p minZ=%.3f count=%zu", m, mi, minZ, b.size());
         Group g{ m, (uint32_t)(pk.data.size() / 16), (uint32_t)b.size() };
@@ -718,12 +727,12 @@ static void __fastcall CbDraw(CbDc* dc, void*);
 
 static void AppendMarker(Packet* pk)
 {
-    CbDc* dc = (CbDc*)((DcAlloc_t)A(G::DcAlloc))(0x18, 0);
+    CbDc* dc = (CbDc*)((DcAlloc_t)A(G.DcAlloc))(0x18, 0);
     if (!dc) return;
-    uint32_t* idc = (uint32_t*)A(G::DcIdCounter);
+    uint32_t* idc = (uint32_t*)A(G.DcIdCounter);
     dc->vt = g_cbVt; dc->id = dc->id ^ ((dc->id ^ *idc) & 0x3fff); (*idc)++;
     dc->kind = 2; dc->pk = pk; dc->group = 0;
-    ((DcAppend_t)A(G::DcAppend))(dc, nullptr);
+    ((DcAppend_t)A(G.DcAppend))(dc, nullptr);
 }
 
 static const float kIdentity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
@@ -748,8 +757,8 @@ static int SampleAttempt(int model, int dirChoice, int bucket, float dist = 4.0f
 {
     SampleDc*& sd = g_samples[model];
     if (!sd) sd = new SampleDc();
-    const float* camp = (const float*)A(G::CamPos);
-    const float* rows = (const float*)A(0x128E310);
+    const float* camp = (const float*)A(G.CamPos);
+    const float* rows = (const float*)A(G.CamRows());
     int axis = dirChoice >> 1; float sg = (dirChoice & 1) ? 1.f : -1.f;
     float p[3]; for (int k = 0; k < 3; k++) p[k] = camp[k] + sg * dist * rows[axis * 4 + k];
     for (int k = 0; k < 3; k++) g_batch.negT[k] = -p[k];
@@ -757,7 +766,7 @@ static int SampleAttempt(int model, int dirChoice, int bucket, float dist = 4.0f
     float m[16]; memcpy(m, kIdentity, sizeof m); m[12] = p[0]; m[13] = p[1]; m[14] = p[2];
     if (!sd->made) {
         g_ownCtor = true;
-        ((DcEntityCtor_t)A(G::DcEntityCtor))(sd->mem, nullptr, model, g_ambB32, g_ambB33, 0, m, bucket, 0);
+        ((DcEntityCtor_t)A(G.DcEntityCtor))(sd->mem, nullptr, model, g_ambB32, g_ambB33, 0, m, bucket, 0);
         g_ownCtor = false; sd->made = true;
     } else {
         memcpy(sd->mem + 0x20, &m[12], 12);
@@ -952,7 +961,7 @@ static void __fastcall CbDraw(CbDc* dc, void*)
             bool have = false; long total = 0;
             for (const Group& g : g_curPacket->groups) if (g_mstate[g.model & 4095] == 1 && g.count > 0) { have = true; total += g_frameDraws[g.model & 4095]; }
             static DWORD lastMiss = 0; static int missCount = 0; DWORD now = GetTickCount();
-            if (have && total == 0) { missCount++; if (now - lastMiss > 700 && missCount < 400) { lastMiss = now; const float* c = (const float*)A(G::CamPos); const float* r = (const float*)A(0x128E310);
+            if (have && total == 0) { missCount++; if (now - lastMiss > 700 && missCount < 400) { lastMiss = now; const float* c = (const float*)A(G.CamPos); const float* r = (const float*)A(G.CamRows());
                 Log("[no-draw frame] attempts=%ld anyDip=%ld failed=%ld uploadFail=%ld groups=%zu inst=%zu ranMask=%02x cam=%.1f,%.1f,%.1f r0=%.2f,%.2f,%.2f r1=%.2f,%.2f,%.2f r2=%.2f,%.2f,%.2f missFrames=%d", g_dbgAttempts, g_dbgAnyDip, g_dbgFailed, g_dbgUploadFail, g_curPacket->groups.size(), g_curPacket->data.size() / 16, g_ranMask, c[0], c[1], c[2], r[0], r[1], r[2], r[4], r[5], r[6], r[8], r[9], r[10], missCount); } }
         }
         if (cfg.debug) { g_dbgAttempts = g_dbgAnyDip = g_dbgFailed = g_dbgUploadFail = 0; long t = 0; for (int i = 0; i < 4096; i++) t += g_frameDraws[i]; g_lastDraws = t; if (t > 0) g_lastDrawFrames++; }
@@ -981,7 +990,7 @@ static void __fastcall hGBuild(void* self)
     }
     if (g_modeReq != g_mode) {
         g_mode = g_modeReq;
-        ((void(__cdecl*)())A(0xC874C0))();      // release every plant triangle (as the game does on teleports): everything regenerates under the new mode
+        ((void(__cdecl*)())A(G.ResetAll))();      // release every plant triangle (as the game does on teleports): everything regenerates under the new mode
         { std::lock_guard<std::mutex> l(g_instMx); g_byTri.clear(); g_edgeCnt.clear(); g_triEdges.clear(); }
         Log("[mode] %s", kModeName[g_mode]);
         HANDLE h = CreateThread(NULL, 0, BeepThread, (LPVOID)(intptr_t)(g_mode + 1), 0, NULL); if (h) CloseHandle(h);
@@ -993,8 +1002,8 @@ static void __fastcall hGBuild(void* self)
     if (!inited) { inited = true; g_cbVt[0] = (void*)&CbDtor; g_cbVt[1] = (void*)&CbDraw; g_cbVt[2] = (void*)&CbSize; }
     LONG f = InterlockedIncrement(&g_frameNo);
     if (cfg.radiusMul != 1.f) {
-        float* mgr = (float*)A(G::PlantMgr);
-        float detail = *(float*)A(0x103F714);
+        float* mgr = (float*)A(G.PlantMgr);
+        float detail = *(float*)A(G.DetailDist);
         float R = (detail * 0.5f + 20.f) * (g_mode == 1 ? 1.f : cfg.radiusMul);
         mgr[5] = R; mgr[7] = R + 40.f; mgr[8] = R * R;
     }
@@ -1006,8 +1015,8 @@ static void __fastcall hGBuild(void* self)
         static DWORD last = 0; DWORD now = GetTickCount();
         if (now - last > 2000) {
             last = now; size_t tris; { std::lock_guard<std::mutex> l(g_instMx); tris = g_byTri.size(); }
-            const float* cam = (const float*)A(G::CamPos);
-            const float* rr = (const float*)A(0x128E310);
+            const float* cam = (const float*)A(G.CamPos);
+            const float* rr = (const float*)A(G.CamRows());
             Log("[stat] amb=%u,%u cam=%.0f,%.0f,%.0f pitchZ=%.2f tris=%zu groups=%zu inst=%zu | cand=%ld supp=%ld | fallbackRuns=%ld lastFrameDraws=%ld framesWithDraws=%ld/%ld", (unsigned)g_ambB32, (unsigned)g_ambB33, cam[0], cam[1], cam[2], rr[6], tris, pk.groups.size(), pk.data.size() / 16, g_candCount, g_candSuppressed, g_fbRuns, (long)g_lastDraws, (long)g_lastDrawFrames, (long)g_renderFrame);
             { std::string gs; char t[64]; for (const Group& g : pk.groups) { sprintf(t, " %d:%d/%d f=%.2f", g.model, g.count, g_preCnt[g.model], g.count ? g_fSum[g.model] / g.count : 0.f); gs += t; } Log("[groups]%s", gs.c_str()); }
         }
@@ -1094,10 +1103,10 @@ _grassCave:
 extern "C" void grassCave();
 static void InstallGrassCave()
 {
-    BYTE* t = (BYTE*)A(0xC87E27);
+    BYTE* t = (BYTE*)A(G.Cave);
     static const BYTE expect[5] = { 0x80, 0x7C, 0x24, 0x20, 0x00 };
-    if (memcmp(t, expect, 5)) { Log("grass cave: unexpected bytes at 0xC87E27, not installed"); return; }
-    g_caveRet = A(0xC87E2C);
+    if (memcmp(t, expect, 5)) { Log("grass cave: unexpected bytes at %08x, not installed", (unsigned)G.Cave); return; }
+    g_caveRet = A(G.Cave + 5);
     DWORD old; VirtualProtect(t, 5, PAGE_EXECUTE_READWRITE, &old);
     t[0] = 0xE9; *(int32_t*)(t + 1) = (int32_t)((uintptr_t)&grassCave - (uintptr_t)(t + 5));
     VirtualProtect(t, 5, old, &old); FlushInstructionCache(GetCurrentProcess(), t, 5);
@@ -1116,6 +1125,28 @@ static char __fastcall hBoundGate(void* self, void* edx, void* bound)
     BoundFn1 f1 = *(BoundFn1*)(*(uintptr_t*)bound + 0x5C);
     for (int i = 0; i < n; i++) { uint32_t w = f1(bound, (uint32_t)i); if (((w >> 8) & 0xff) == 0 && g_grassMat[w & 0xff]) return 1; }
     return 0;
+}
+// 1.0.8.0 only. When a collision object is attached to the plant system, the game builds two bits per polygon
+// (2i: first plant category, 2i+1: second). The polygon scan later only looks at polygons with a bit set. Set bit 2i+1 for
+// grass-material polygons that carry no tag, exactly what the code patch in the polygon scan does on 1.2.0.59.
+typedef void*(__fastcall* BoundAttach_t)(void*, void*, void*);
+static BoundAttach_t oBoundAttach;
+static void* __fastcall hBoundAttach(void* self, void* edx, void* owner)
+{
+    void* r = oBoundAttach(self, edx, owner);
+    if (g_mode == 1 || !r) return r;
+    uint8_t* s = (uint8_t*)self;
+    uintptr_t o = 0, t1 = 0, t2 = 0, bnd = 0, bitsP = 0, cnt = 0;
+    if (!Rd((uintptr_t)s + 0x44, &o) || !o || !Rd(o + 0x38, &t1) || !t1 || !Rd(t1 + 4, &t2) || !t2 || !Rd(t2 + 0xC, &bnd) || !bnd) return r;
+    if (!Rd((uintptr_t)s + 0x48, &bitsP) || !bitsP || !Rd(bnd + 0x33 * 4, &cnt)) return r;
+    const int n = (int)cnt; if (n <= 0 || n > 20000) return r;
+    const uint32_t bitWords = *(uint16_t*)(s + 0x4C); uint32_t* bits = (uint32_t*)bitsP;
+    for (int i = 0; i < n; i++) {
+        uint32_t wd; Words((void*)bnd, (uint32_t)i, &wd);       // polygon i of the bound -> its material word
+        int mat = wd & 0xff, tag = (wd >> 8) & 0xff;
+        if (tag == 0 && g_grassMat[mat] && GrassTagFor(mat)) { int bit = 2 * i + 1; if ((uint32_t)(bit >> 5) < bitWords) bits[bit >> 5] |= 1u << (bit & 31); }
+    }
+    return r;
 }
 // triangle creation: write the vegetation tag into the polygon's material word
 typedef void(__fastcall* TriBuild_t)(void*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
@@ -1158,12 +1189,16 @@ static void InstallGrassHooks()
         }
         p = q + 1;
     }
-    if (*(BYTE*)A(0xC86C80) != 0x53 || *(BYTE*)A(0xC87F40) != 0x55) { Log("grass hooks: unexpected prologue, not installed"); return; }
+    if (*(BYTE*)A(G.BoundGate) != G.bgByte || *(BYTE*)A(G.TriBuild) != G.tbByte) { Log("grass hooks: unexpected prologue, not installed"); return; }
     if (cfg.grassMaterialFix) {      // give the listed grass materials a plant tag (off: leave the game's tags alone, e.g. when another mod fixes them)
-        oBoundGate = (BoundGate_t)MakeHook(A(0xC86C80), 8, (void*)&hBoundGate);
-        oTriBuild = (TriBuild_t)MakeHook(A(0xC87F40), 12, (void*)&hTriBuild);
+        oBoundGate = (BoundGate_t)MakeHook(A(G.BoundGate), G.lenGate, (void*)&hBoundGate);
+        oTriBuild = (TriBuild_t)MakeHook(A(G.TriBuild), G.lenBuild, (void*)&hTriBuild);
+        if (G.v1080) {      // 1.0.8.0: the per-polygon "has plants" bits are built when a collision object is attached: add the grass polygons there
+            if (*(BYTE*)A(G.BoundAttach) == 0x8B) oBoundAttach = (BoundAttach_t)MakeHook(A(G.BoundAttach), G.lenAttach, (void*)&hBoundAttach);
+            else Log("bound attach prologue mismatch: grass polygons without a tag will not get plants");
+        }
     } else Log("GrassMaterialFix=0: grass materials keep the game's own plant tags (edge culling still uses the list)");
-    if (*(BYTE*)A(0xC86540) == 0x55) oTriNew = (TriNew_t)MakeHook(A(0xC86540), 9, (void*)&hTriNew); else Log("tri-new prologue mismatch, edge culling off");
+    if (*(BYTE*)A(G.TriNew) == G.tnByte) oTriNew = (TriNew_t)MakeHook(A(G.TriNew), G.lenNew, (void*)&hTriNew); else Log("tri-new prologue mismatch, edge culling off");
 }
 
 // ---------------------------------------------------------------- crash forensics
@@ -1200,14 +1235,19 @@ static LONG WINAPI VehLog(EXCEPTION_POINTERS* ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+static HMODULE g_self;
 static DWORD WINAPI InitThread(LPVOID)
 {
     g_base = (uintptr_t)GetModuleHandleA(NULL);
     char path[MAX_PATH]; GetModuleFileNameA(NULL, path, MAX_PATH);
     char* sl = strrchr(path, '\\'); *sl = 0;
     std::string dir = path;
-    g_log = fopen((dir + "\\plugins\\ProperGrass.log").c_str(), "w");
-    std::string ini = dir + "\\plugins\\ProperGrass.ini";
+    // the INI and the log live next to this plugin (plugins\\ folder or the game folder, wherever the ASI loader found it)
+    char selfPath[MAX_PATH] = ""; GetModuleFileNameA(g_self, selfPath, MAX_PATH);
+    { char* ss = strrchr(selfPath, '\\'); if (ss) *ss = 0; else strcpy(selfPath, path); }
+    std::string modDir = selfPath;
+    g_log = fopen((modDir + "\\ProperGrass.log").c_str(), "w");
+    std::string ini = modDir + "\\ProperGrass.ini";
     AddVectoredExceptionHandler(1, VehLog);
     cfg.enabled = GetPrivateProfileIntA("Main", "Enabled", 1, ini.c_str());
     cfg.triCapacity = GetPrivateProfileIntA("Main", "TriCapacity", 16384, ini.c_str());
@@ -1236,39 +1276,42 @@ static DWORD WINAPI InitThread(LPVOID)
     Log("ProperGrass " PROPERGRASS_VERSION " starting (enabled=%d tri=%d maxInst=%d density=%.2f radius=%.2f scale=%.2f slope=%.2f)", cfg.enabled, cfg.triCapacity, cfg.maxInstances, cfg.densityMul, cfg.radiusMul, cfg.plantScale, cfg.slopeAlign);
     if (!cfg.enabled) return 0;
 
-    // identity check
+    // identity check: which executable is this?
     {
         auto chk = [&](const char* n, bool ok) { Log("check %-12s %s", n, ok ? "ok" : "FAIL"); return ok; };
         Log("base=%08x delta=%08x", (unsigned)g_base, (unsigned)(g_base - 0x400000));
-        bool ok = true;
-        ok &= chk("thunk", *(BYTE*)A(0xC86C10) == 0xB9);
-        ok &= chk("plantmgr", *(uint32_t*)A(0xC86C11) == A(G::PlantMgr));
-        ok &= chk("capimm", *(uint32_t*)A(G::TriCapImm) == 0x200);
-        ok &= chk("gbuild", *(BYTE*)A(0xD685F0) == 0x51 || *(BYTE*)A(0xD685F0) == 0xE9);
-        ok &= chk("candadd", *(BYTE*)A(G::CandidateAdd) == 0x55);
-        ok &= chk("reset", *(BYTE*)A(0xC87450) == 0xB9);
+        auto matches = [&](const GameAddrs& g) {
+            return *(BYTE*)A(g.Reset) == 0xB9 && *(uint32_t*)A(g.Reset + 1) == A(g.PlantMgr) && *(uint32_t*)A(g.TriCapImm) == 0x200 &&
+                   (*(BYTE*)A(g.GBufferBuild) == 0x51 || *(BYTE*)A(g.GBufferBuild) == 0xE9) && *(BYTE*)A(g.CandidateAdd) == 0x55 &&
+                   (*(BYTE*)A(g.EntDraw) == 0x55 || *(BYTE*)A(g.EntDraw) == 0xE9) && *(BYTE*)A(g.TriRelease) != 0 ;
+        };
+        bool ok = false;
+        if (!IsBadReadPtr((void*)A(kCE.Reset), 8) && !IsBadReadPtr((void*)A(kCE.TriCapImm), 4) && matches(kCE)) { G = kCE; ok = true; }
+        else if (!IsBadReadPtr((void*)A(k1080.Reset), 8) && !IsBadReadPtr((void*)A(k1080.TriCapImm), 4) && matches(k1080)) { G = k1080; ok = true; }
+        chk("executable", ok);
         if (!ok) { Log("unsupported executable (signature mismatch) - disabled"); return 0; }
+        Log("detected game version: %s", G.name);
     }
     LoadMaterialNames(dir + "\\common\\data\\materials\\materials.dat");
     ParseProcedural((dir + "\\common\\data\\materials\\procedural.dat").c_str());
     if (!g_itemsValid) return 0;
 
     // raise the active-triangle capacity (must happen before the manager initialises)
-    { DWORD old; BYTE* p = (BYTE*)A(G::TriCapImm); VirtualProtect(p, 4, PAGE_EXECUTE_READWRITE, &old); *(uint32_t*)p = (uint32_t)cfg.triCapacity; VirtualProtect(p, 4, old, &old); }
+    { DWORD old; BYTE* p = (BYTE*)A(G.TriCapImm); VirtualProtect(p, 4, PAGE_EXECUTE_READWRITE, &old); *(uint32_t*)p = (uint32_t)cfg.triCapacity; VirtualProtect(p, 4, old, &old); }
 
-    if (cfg.grassMaterialFix) InstallGrassCave();
+    if (cfg.grassMaterialFix && !G.v1080) InstallGrassCave();
     InstallGrassHooks();
-    oCandAdd = (CandAddFn)MakeHook(A(G::CandidateAdd), 8, (void*)&hCandAdd);
-    oTriRelease = (TriReleaseFn)MakeHook(A(G::TriRelease), 7, (void*)&hTriRelease);
-    oGBuild = (GBuild_t)MakeHook(A(G::GBufferBuild), 11, (void*)&hGBuild);
-    oReset = (ResetFn)MakeHook(A(0xC87450), 5, (void*)&hReset2);
-    oEntDraw = (EntDraw_t)MakeHook(A(0x8DCBF0), 6, (void*)&hEntDraw);
+    oCandAdd = (CandAddFn)MakeHook(A(G.CandidateAdd), G.lenCand, (void*)&hCandAdd);
+    oTriRelease = (TriReleaseFn)MakeHook(A(G.TriRelease), G.lenRel, (void*)&hTriRelease);
+    oGBuild = (GBuild_t)MakeHook(A(G.GBufferBuild), G.lenGBuild, (void*)&hGBuild);
+    oReset = (ResetFn)MakeHook(A(G.Reset), G.lenReset, (void*)&hReset2);
+    oEntDraw = (EntDraw_t)MakeHook(A(G.EntDraw), G.lenEnt, (void*)&hEntDraw);
     Log("hooks installed: cand=%p release=%p gbuild=%p", oCandAdd, oTriRelease, oGBuild);
     return 0;
 }
 
-BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID)
+BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID)
 {
-    if (reason == DLL_PROCESS_ATTACH) { HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL); if (h) CloseHandle(h); }
+    if (reason == DLL_PROCESS_ATTACH) { g_self = (HMODULE)self; HANDLE h = CreateThread(NULL, 0, InitThread, NULL, 0, NULL); if (h) CloseHandle(h); }
     return TRUE;
 }
