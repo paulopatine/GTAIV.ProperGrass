@@ -21,7 +21,7 @@
 static struct {
     int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0;
     float drawDistance = 0.f;      // 0 = use the game's plant radius
-    float densityMul = 1.f, radiusMul = 1.f, plantScale = 1.f;
+    float densityMul = 1.f, radiusMul = 1.f, plantScale = 1.f, slopeAlign = 1.f;
     float normalTilt = 0.f; float edgeMargin = 0.35f, edgeSoft = 1.0f, fadeWidth = 12.f;
     std::string grassMaterials = "GRASS@EXT_GRASS_DRYPLANTS_SHORT,SHORT_GRASS@EXT_GRASS_DRYPLANTS_SHORT,GRASS_PATCHY@EXT_GRASS_DRYPLANTS_SHORT,GRASS_LONG@EXT_GRASS_DRYPLANTS_LONG";
 } cfg;
@@ -160,8 +160,11 @@ static void ComputeBase(Inst& in)
     float X[3] = { in.cs * sxy, in.sn * sxy, 0 };
     float Y[3] = { -in.sn * sxy, in.cs * sxy, 0 };
     float Z[3] = { 0, 0, szz };
-    if (in.align) {       // align up-axis to surface normal
-        const float* n = in.nrm;
+    // up-axis: straight up (vanilla game), the surface normal, or a blend of both (SlopeAlign; items with ALIGN=1 always follow the normal)
+    const float a = in.align ? 1.f : cfg.slopeAlign;
+    if (a > 0.001f && in.nrm[2] > 0.05f) {
+        float n[3] = { in.nrm[0] * a, in.nrm[1] * a, in.nrm[2] * a + (1.f - a) };
+        { float l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]); n[0] /= l; n[1] /= l; n[2] /= l; }
         float yd[3] = { Y[0], Y[1], 0 };
         float cx = yd[1] * n[2] - yd[2] * n[1], cy = yd[2] * n[0] - yd[0] * n[2], cz = yd[0] * n[1] - yd[1] * n[0];
         float l = sqrtf(cx * cx + cy * cy + cz * cz); if (l > 1e-5f) { float s = sxy / l; X[0] = cx * s; X[1] = cy * s; X[2] = cz * s; }
@@ -1211,6 +1214,8 @@ static DWORD WINAPI InitThread(LPVOID)
     char buf[32]; GetPrivateProfileStringA("Main", "DrawDistance", "0", buf, 32, ini.c_str()); cfg.drawDistance = (float)atof(buf);
     GetPrivateProfileStringA("Main", "DensityMultiplier", "1.0", buf, 32, ini.c_str()); cfg.densityMul = (float)atof(buf);
     GetPrivateProfileStringA("Main", "PlantScale", "1.0", buf, 32, ini.c_str()); cfg.plantScale = (float)atof(buf);
+    GetPrivateProfileStringA("Main", "SlopeAlign", "1", buf, 32, ini.c_str()); cfg.slopeAlign = (float)atof(buf);
+    if (!(cfg.slopeAlign >= 0.f)) cfg.slopeAlign = 0.f; if (cfg.slopeAlign > 1.f) cfg.slopeAlign = 1.f;
     if (!(cfg.plantScale >= 0.25f)) cfg.plantScale = cfg.plantScale > 0.f ? 0.25f : 1.f; if (cfg.plantScale > 3.f) cfg.plantScale = 3.f;
     cfg.grassTag = GetPrivateProfileIntA("Main", "GrassTag", 0, ini.c_str());
     GetPrivateProfileStringA("Main", "EdgeMargin", "0.35", buf, 32, ini.c_str()); cfg.edgeMargin = (float)atof(buf);
@@ -1225,7 +1230,7 @@ static DWORD WINAPI InitThread(LPVOID)
     GetPrivateProfileStringA("Main", "CullKey", "0", buf, 32, ini.c_str()); cfg.cullKey = (int)strtol(buf, nullptr, 0);
     GetPrivateProfileStringA("Main", "ToggleKey", "0", buf, 32, ini.c_str()); cfg.toggleKey = (int)strtol(buf, nullptr, 0);
     QueryPerformanceFrequency(&g_qpf);
-    Log("ProperGrass " PROPERGRASS_VERSION " starting (enabled=%d tri=%d maxInst=%d density=%.2f radius=%.2f scale=%.2f)", cfg.enabled, cfg.triCapacity, cfg.maxInstances, cfg.densityMul, cfg.radiusMul, cfg.plantScale);
+    Log("ProperGrass " PROPERGRASS_VERSION " starting (enabled=%d tri=%d maxInst=%d density=%.2f radius=%.2f scale=%.2f slope=%.2f)", cfg.enabled, cfg.triCapacity, cfg.maxInstances, cfg.densityMul, cfg.radiusMul, cfg.plantScale, cfg.slopeAlign);
     if (!cfg.enabled) return 0;
 
     // identity check

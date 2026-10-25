@@ -12,6 +12,7 @@ Inspired by *SA Proper Shaders* (GTA SA). Works alongside FusionFix, DXVK and DL
 - **No more object limit.** The plant triangle pool grows from 512 to 16384, and plants are drawn as instances instead of one game object each.
 - **Longer reach with a soft fade.** Plants grow in over the last metres instead of popping in.
 - **Clean borders.** Plants no longer spill onto asphalt or sidewalks.
+- **Plants follow the terrain.** On slopes they grow perpendicular to the ground instead of sticking straight up (adjustable).
 - **View-cone culling** keeps the GPU cost low.
 
 ## How it differs from "Grass and Procedural Props Fix"
@@ -46,6 +47,7 @@ Copy `GTAIV.ProperGrass.asi` and `ProperGrass.ini` into the `plugins` folder nex
 | `FadeWidth` | 12 | Metres over which plants grow in at the edge of the radius |
 | `DensityMultiplier` | 1.0 | Scales plant density |
 | `PlantScale` | 1.0 | Size of all plants, width and height (0.25 - 3.0) |
+| `SlopeAlign` | 1 | How much plants follow the slope: 1 = perpendicular to the ground, 0 = straight up like vanilla |
 | `TriCapacity` | 16384 | Active plant triangles |
 | `EdgeMargin` / `EdgeSoft` | 0.35 / 1.0 | Keeps plants away from the border of a grass area |
 | `FrustumCull` | 1 | Skip plants outside the camera view |
