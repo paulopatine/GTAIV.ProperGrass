@@ -289,7 +289,7 @@ struct Inst {                 // compact; world matrix is built at frame time
     float cs, sn;             // cos/sin of rotation
     float sxy, sz, zoff;
     float nrm[3];
-    uint16_t model; uint8_t align; uint8_t pad;
+    uint16_t model; uint8_t align; uint8_t cov;      // cov: the spot lies under another surface (see TriCover)
     float base[9];            // X, Y, Z rows of the world matrix at full size (scaled per frame by fade * edge factor)
     float t0z;                // pos.z + zoff
     float es;                 // cached edge factor (<0: removed by the edge margin)
@@ -316,7 +316,7 @@ static void ComputeBase(Inst& in)
     memcpy(in.base, X, 12); memcpy(in.base + 3, Y, 12); memcpy(in.base + 6, Z, 12);
     in.t0z = in.pos[2] + in.zoff; in.es = 1.f;
 }
-struct TriData { std::vector<Inst> v; int sig = -1; float bmin[3] = { 1e30f, 1e30f, 1e30f }, bmax[3] = { -1e30f, -1e30f, -1e30f }; };      // sig: which edges were boundary edges when es was cached
+struct TriData { std::vector<Inst> v; int sig = -1; bool covDirty = true; float bmin[3] = { 1e30f, 1e30f, 1e30f }, bmax[3] = { -1e30f, -1e30f, -1e30f }; };      // sig: which edges were boundary edges when es was cached
 static std::mutex g_instMx;
 static std::unordered_map<uintptr_t, TriData> g_byTri;     // tri ptr -> instances
 static std::unordered_set<int> g_badModels;                          // models we could not instance (fall back to game entities)
@@ -348,6 +348,8 @@ typedef void(__fastcall* CandAddFn)(void* mgr, void*, const float* pos, const fl
 static CandAddFn oCandAdd;
 
 static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nrm, const void* item, const void* tri);
+static bool SpotCovered(uintptr_t tri, const float* p);
+static void MarkTriEntity(uintptr_t tri, const float* p);
 static void __fastcall hCandAdd(void* mgr, void* edx, const float* pos, const float* nrm, const void* item, const void* tri)
 {
     if (!cfg.profile) { hCandAddImpl(mgr, edx, pos, nrm, item, tri); return; }
@@ -379,6 +381,7 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
         if (model >= 0 && model < 4096) { g_vegSeen[model] = true; g_isProp[model] = g_items[idx].veg ? 0 : 1; if (!g_mname[model][0]) strncpy(g_mname[model], g_items[idx].name, 47); }
         if (model >= 0 && model < 4096 && g_mstate[model] != 1) { std::lock_guard<std::mutex> l(g_instMx); g_seenModels.insert(model); }
         static LONG s_pass[4096];
+        if (cfg.grassMaterialFix && g_mode != 1 && SpotCovered((uintptr_t)tri, pos)) { if (idx < 256) InterlockedIncrement(&g_itemSupp[idx]); return; }      // under a road: neither an instance nor a game entity
         bool doSupp = false; if (g_mode == 0 && model >= 0 && model < 4096 && g_mstate[model] != 2 && ModelResident(model)) { LONG pc = InterlockedIncrement(&s_pass[model]); doSupp = (pc & 31) != 0; /* 1 in 32 stays a real game entity: keeps the model referenced/streamed in */ }
         if (doSupp) {
             if (idx < 256) InterlockedIncrement(&g_itemSupp[idx]);
@@ -398,7 +401,7 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
             ComputeBase(in);
             {
                 std::lock_guard<std::mutex> l(g_instMx);
-                TriData& td = g_byTri[(uintptr_t)tri]; td.v.push_back(in); td.sig = -1;
+                TriData& td = g_byTri[(uintptr_t)tri]; in.cov = 0; td.v.push_back(in); td.sig = -1; td.covDirty = true;
                 for (int k = 0; k < 3; k++) { if (pos[k] < td.bmin[k]) td.bmin[k] = pos[k]; if (pos[k] > td.bmax[k]) td.bmax[k] = pos[k]; }
                 g_seenModels.insert(model);
             }
@@ -407,6 +410,7 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
         }
     }
     InterlockedIncrement(&g_nEnt);
+    if (cfg.grassMaterialFix) MarkTriEntity((uintptr_t)tri, pos);
     oCandAdd(mgr, edx, pos, nrm, item, tri);
 }
 
@@ -422,16 +426,167 @@ static void EdgesRemove(uintptr_t tri)   // caller holds g_instMx
     for (int e = 0; e < 3; e++) { auto c = g_edgeCnt.find(it->second.key[e]); if (c != g_edgeCnt.end() && --c->second == 0) g_edgeCnt.erase(c); }
     g_triEdges.erase(it);
 }
+// GrassMaterialFix=1: grass polygons the game left untagged often lie under a road or pavement (terrain kept below the
+// street). The mod tags them, so their plants would poke through the asphalt. Every live plant triangle is kept here with
+// its corners; a plant of a grass triangle is hidden when a road, pavement or another plant triangle covers its spot from above.
+static bool g_grassMat[256];      // materials listed in GrassMaterials
+struct TriGeom { float v[9]; bool inj; uint8_t mat; int x0, y0, x1, y1; uintptr_t rec; uint32_t slot; std::vector<float> ents; };      // rec/slot: the scan record and slot that own the triangle; ents: spots (x,y,z) of game objects made for it
+static std::unordered_map<uintptr_t, TriGeom> g_geom;                    // under g_instMx
+static std::unordered_map<uint64_t, std::vector<uintptr_t>> g_geomCell;  // 4 m cells -> triangles touching them
+static thread_local bool t_injecting = false;                             // the game is building a triangle the mod gave a grass tag
+static thread_local uintptr_t t_rec = 0; static thread_local uint32_t t_slot = 0;      // ... for this scan record and slot
+static std::unordered_set<uintptr_t> g_releaseQ;      // mod-tagged triangles with game objects near a surface that just came: check, maybe regenerate
+static const float kCell = 4.f;
+static inline uint64_t CellKey(int x, int y) { return ((uint64_t)(uint32_t)x << 32) | (uint32_t)y; }
+static volatile float g_coverRange = 120.f;      // covers are kept within this distance of the camera (plant radius + margin)
+static void GeomRemove(uintptr_t tri)      // caller holds g_instMx
+{
+    auto it = g_geom.find(tri); if (it == g_geom.end()) return;
+    const TriGeom& g = it->second;
+    for (int x = g.x0; x <= g.x1; x++) for (int y = g.y0; y <= g.y1; y++) {
+        auto c = g_geomCell.find(CellKey(x, y)); if (c == g_geomCell.end()) continue;
+        auto& v = c->second; for (size_t i = 0; i < v.size(); i++) if (v[i] == tri) { v[i] = v.back(); v.pop_back(); break; }
+        if (v.empty()) g_geomCell.erase(c);
+    }
+    g_geom.erase(it);
+}
+static void GeomMarkDirty(int x0, int y0, int x1, int y1, uintptr_t self)      // a surface came or went: plants of mod-tagged triangles around it are checked again
+{
+    for (int x = x0; x <= x1; x++) for (int y = y0; y <= y1; y++) {
+        auto c = g_geomCell.find(CellKey(x, y)); if (c == g_geomCell.end()) continue;
+        for (uintptr_t t : c->second) { if (t == self) continue; auto gi = g_geom.find(t); if (gi == g_geom.end() || !gi->second.inj) continue; auto b = g_byTri.find(t); if (b != g_byTri.end()) b->second.covDirty = true; if (!gi->second.ents.empty()) g_releaseQ.insert(t); }
+    }
+    if (self) { auto b = g_byTri.find(self); if (b != g_byTri.end()) b->second.covDirty = true; }
+}
+static bool TriZAt(const float* v, float x, float y, float* z)
+{
+    const float *a = v, *b = v + 3, *c = v + 6;
+    float d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]); if (fabsf(d) < 1e-6f) return false;
+    float l1 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / d, l2 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / d, l3 = 1.f - l1 - l2;
+    if (l1 < 0.f || l2 < 0.f || l3 < 0.f) return false;
+    *z = l1 * a[2] + l2 * b[2] + l3 * c[2]; return true;
+}
+static void GeomAdd(uintptr_t tri, const float* t4, bool inj, uint32_t word, uintptr_t rec, uint32_t slot)      // t4: the game's triangle, corners 16 bytes apart; caller holds g_instMx
+{
+    GeomRemove(tri);
+    TriGeom g; for (int k = 0; k < 3; k++) { g.v[k * 3] = t4[k * 4]; g.v[k * 3 + 1] = t4[k * 4 + 1]; g.v[k * 3 + 2] = t4[k * 4 + 2]; }
+    g.mat = (uint8_t)(word & 0xff); g.inj = inj || g_grassMat[g.mat]; g.rec = rec; g.slot = slot;      // every grass triangle (tagged by the mod or by the game) is checked against covers: the game's own grass reaches under pavements too
+    float mnx = std::min(g.v[0], std::min(g.v[3], g.v[6])), mxx = std::max(g.v[0], std::max(g.v[3], g.v[6]));
+    float mny = std::min(g.v[1], std::min(g.v[4], g.v[7])), mxy = std::max(g.v[1], std::max(g.v[4], g.v[7]));
+    g.x0 = (int)floorf(mnx / kCell); g.x1 = (int)floorf(mxx / kCell); g.y0 = (int)floorf(mny / kCell); g.y1 = (int)floorf(mxy / kCell);
+    if (g.x1 - g.x0 > 64 || g.y1 - g.y0 > 64) return;      // implausibly large: ignore
+    for (int x = g.x0; x <= g.x1; x++) for (int y = g.y0; y <= g.y1; y++) g_geomCell[CellKey(x, y)].push_back(tri);
+    g_geom[tri] = g;
+    GeomMarkDirty(g.x0, g.y0, g.x1, g.y1, tri);
+}
+// Collision polygons without any plant tag (most roads and pavements) never become plant triangles, so the polygon scan
+// hands them to CapturePoly instead: their world-space triangles are kept as "cover" surfaces too.
+struct PolyGeom { float v[2][9]; int nt; int x0, y0, x1, y1; };
+static std::unordered_map<uint64_t, PolyGeom> g_poly;                    // (bound, polygon) -> triangles; under g_instMx
+static std::unordered_map<uint64_t, std::vector<uint64_t>> g_polyCell;   // 4 m cells -> polygons touching them
+static void PolyRemove(uint64_t key)      // caller holds g_instMx
+{
+    auto it = g_poly.find(key); if (it == g_poly.end()) return;
+    const PolyGeom& g = it->second;
+    for (int x = g.x0; x <= g.x1; x++) for (int y = g.y0; y <= g.y1; y++) {
+        auto c = g_polyCell.find(CellKey(x, y)); if (c == g_polyCell.end()) continue;
+        auto& v = c->second; for (size_t i = 0; i < v.size(); i++) if (v[i] == key) { v[i] = v.back(); v.pop_back(); break; }
+        if (v.empty()) g_polyCell.erase(c);
+    }
+    g_poly.erase(it);
+}
+// world-space corners of polygon `idx` of a collision bound, the way the game's triangle builder computes them
+// (bound: +0x8C polygons of 32 bytes with vertex indices at +0x10, +0xB0 int16 vertices, +0x90 scale, +0xA0 offset;
+// entity: rows of its matrix at +0x00/+0x10/+0x20/+0x30, used unless the byte at +0x40 is set)
+static int PolyWorld(const uint8_t* bound, const uint8_t* ent, uint32_t idx, float w[4][3])      // number of corners, 0 if unusable
+{
+    if (!bound) return 0;
+    const uint8_t* polys = *(const uint8_t* const*)(bound + 0x8C); const int16_t* vtx = *(const int16_t* const*)(bound + 0xB0);
+    if (!polys || !vtx || idx >= *(const uint32_t*)(bound + 0xCC)) return 0;
+    const uint8_t* pr = polys + idx * 32; const uint16_t* ind = (const uint16_t*)(pr + 0x10);
+    const float* sc = (const float*)(bound + 0x90); const float* of = (const float*)(bound + 0xA0);
+    bool xf = false; const float* m = (const float*)ent;
+    if (ent && !ent[0x40]) { uintptr_t q = *(const uintptr_t*)(ent + 0x44); if (q) { q = *(const uintptr_t*)(q + 0x38); xf = q != 0; } }
+    const int nv = ind[3] ? 4 : 3;
+    for (int k = 0; k < nv; k++) {
+        const int16_t* qv = vtx + ind[k] * 3; float l[3] = { qv[0] * sc[0] + of[0], qv[1] * sc[1] + of[1], qv[2] * sc[2] + of[2] };
+        if (xf) for (int r = 0; r < 3; r++) w[k][r] = m[r] * l[0] + m[4 + r] * l[1] + m[8 + r] * l[2] + m[12 + r]; else memcpy(w[k], l, 12);
+    }
+    return nv;
+}
+static void CapturePoly(const uint8_t* bound, uint32_t idx, float w[4][3], int nv)      // caller holds g_instMx
+{
+    PolyGeom g; g.nt = 0; static const int tri[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
+    for (int t = 0; t < (nv == 4 ? 2 : 1); t++) {
+        const float *a = w[tri[t][0]], *b = w[tri[t][1]], *c = w[tri[t][2]];
+        float ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+        float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, nl = sqrtf(nx * nx + ny * ny + nz * nz);
+        if (nl < 1e-4f || fabsf(nz) < 0.3f * nl) continue;      // walls and slivers cannot cover the ground
+        memcpy(g.v[g.nt], a, 12); memcpy(g.v[g.nt] + 3, b, 12); memcpy(g.v[g.nt] + 6, c, 12); g.nt++;
+    }
+    const uint64_t key = ((uint64_t)(uintptr_t)bound << 32) | idx;
+    auto old = g_poly.find(key);
+    if (old != g_poly.end()) { if (old->second.nt == g.nt && (!g.nt || !memcmp(old->second.v, g.v, sizeof(float) * 9 * g.nt))) return; PolyRemove(key); }
+    if (!g.nt) return;
+    float mnx = 1e30f, mny = 1e30f, mxx = -1e30f, mxy = -1e30f;
+    for (int t = 0; t < g.nt; t++) for (int k = 0; k < 3; k++) { mnx = std::min(mnx, g.v[t][k * 3]); mxx = std::max(mxx, g.v[t][k * 3]); mny = std::min(mny, g.v[t][k * 3 + 1]); mxy = std::max(mxy, g.v[t][k * 3 + 1]); }
+    g.x0 = (int)floorf(mnx / kCell); g.x1 = (int)floorf(mxx / kCell); g.y0 = (int)floorf(mny / kCell); g.y1 = (int)floorf(mxy / kCell);
+    if (g.x1 - g.x0 > 32 || g.y1 - g.y0 > 32) return;
+    for (int x = g.x0; x <= g.x1; x++) for (int y = g.y0; y <= g.y1; y++) g_polyCell[CellKey(x, y)].push_back(key);
+    g_poly[key] = g;
+    GeomMarkDirty(g.x0, g.y0, g.x1, g.y1, 0);
+}
+// The polygon scan visits an untagged non-grass polygon (road, pavement): keep it as a possible cover while it is near
+// the camera. The scan reaches it before the plants around it are made (it starts outside the plant radius), so their
+// spots are checked against it from the start. Caller holds g_instMx.
+static void OfferCover(const uint8_t* bound, const uint8_t* ent, uint32_t idx)
+{
+    if (g_poly.size() > 150000 || g_poly.count(((uint64_t)(uintptr_t)bound << 32) | idx)) return;
+    float w[4][3]; const int nv = PolyWorld(bound, ent, idx, w); if (!nv) return;
+    const float* cam = (const float*)A(G.CamPos); const float r = g_coverRange;
+    bool nearCam = false; for (int k = 0; k < nv && !nearCam; k++) nearCam = fabsf(w[k][0] - cam[0]) < r && fabsf(w[k][1] - cam[1]) < r;
+    if (nearCam) CapturePoly(bound, idx, w, nv);
+}
+// Is the spot of a plant of a mod-tagged triangle under another surface? Non-grass surfaces (roads, pavements) count when
+// they are level with the plant or up to 3 m above it, also 25 cm around it (the plant's leaves); another grass triangle
+// counts when it is 5 cm - 3 m above. Caller holds g_instMx.
+static bool CoveredAt(uintptr_t self, const float* p)
+{
+    const uintptr_t arrBase = *(uint32_t*)(A(G.PlantMgr) + 0xF30), arrEnd = arrBase + (uintptr_t)(*(uint32_t*)(A(G.PlantMgr) + 0x18)) * 0x60;
+    static const float off[5][2] = { { 0, 0 }, { 0.25f, 0 }, { -0.25f, 0 }, { 0, 0.25f }, { 0, -0.25f } };
+    for (int sI = 0; sI < 5; sI++) {
+        const float x = p[0] + off[sI][0], y = p[1] + off[sI][1]; const uint64_t ck = CellKey((int)floorf(x / kCell), (int)floorf(y / kCell)); float z;
+        auto c = g_geomCell.find(ck);
+        if (c != g_geomCell.end()) for (uintptr_t u : c->second) {
+            if (u == self || u < arrBase || u >= arrEnd || !(((const uint8_t*)u)[0x55] & 4)) continue;      // only triangles still spawned
+            auto ug = g_geom.find(u); if (ug == g_geom.end()) continue;
+            const bool grass = g_grassMat[ug->second.mat]; if (grass && sI) continue;
+            if (TriZAt(ug->second.v, x, y, &z) && z - p[2] > (grass ? 0.05f : -0.03f) && z - p[2] < 3.f) return true;
+        }
+        auto pc = g_polyCell.find(ck);
+        if (pc != g_polyCell.end()) for (uint64_t k : pc->second) {
+            auto pg = g_poly.find(k); if (pg == g_poly.end()) continue;
+            for (int t = 0; t < pg->second.nt; t++) if (TriZAt(pg->second.v[t], x, y, &z) && z - p[2] > -0.03f && z - p[2] < 3.f) return true;
+        }
+    }
+    return false;
+}
+static void MarkTriEntity(uintptr_t tri, const float* p) { std::lock_guard<std::mutex> l(g_instMx); auto g = g_geom.find(tri); if (g != g_geom.end() && g->second.inj && g->second.ents.size() < 300) g->second.ents.insert(g->second.ents.end(), p, p + 3); }
+static bool SpotCovered(uintptr_t tri, const float* p)
+{
+    std::lock_guard<std::mutex> l(g_instMx);
+    auto g = g_geom.find(tri); return g != g_geom.end() && g->second.inj && CoveredAt(tri, p);
+}
 typedef void(__fastcall* TriReleaseFn)(void* tri);
 static TriReleaseFn oTriRelease;
 static void __fastcall hTriRelease(void* tri)
 {
-    { std::lock_guard<std::mutex> l(g_instMx); g_byTri.erase((uintptr_t)tri); EdgesRemove((uintptr_t)tri); }
+    { std::lock_guard<std::mutex> l(g_instMx); g_byTri.erase((uintptr_t)tri); EdgesRemove((uintptr_t)tri); auto g = g_geom.find((uintptr_t)tri); if (g != g_geom.end()) { TriGeom c = g->second; GeomRemove((uintptr_t)tri); GeomMarkDirty(c.x0, c.y0, c.x1, c.y1, 0); } }
     oTriRelease(tri);
 }
 typedef void(__cdecl* ResetFn)();
 static ResetFn oReset;
-static void __cdecl hReset2() { { std::lock_guard<std::mutex> l(g_instMx); g_byTri.clear(); g_edgeCnt.clear(); g_triEdges.clear(); } oReset(); }
+static void __cdecl hReset2() { { std::lock_guard<std::mutex> l(g_instMx); g_byTri.clear(); g_edgeCnt.clear(); g_triEdges.clear(); g_geom.clear(); g_geomCell.clear(); g_poly.clear(); g_polyCell.clear(); g_releaseQ.clear(); } oReset(); }
 
 // ---------------------------------------------------------------- D3DX (runtime-loaded) and VS patching
 struct ID3DXBufferLite : IUnknown { virtual void* STDMETHODCALLTYPE GetBufferPointer() = 0; virtual DWORD STDMETHODCALLTYPE GetBufferSize() = 0; };
@@ -677,6 +832,7 @@ static void BuildPacket(Packet& pk)
     float R = cfg.drawDistance > 0 ? cfg.drawDistance : *(float*)(A(G.PlantMgr) + 0x14);
     if (R < 10.f) R = 10.f;
     float R2 = R * R;
+    g_coverRange = R + 25.f;
     float fw = cfg.fadeWidth; if (fw > R * 0.6f) fw = R * 0.6f;
     // view cone: a circular cone around the camera's forward axis that contains the whole screen (vertical FOV up to 70 deg,
     // current aspect ratio) with 15% spare for the one-frame lag; plants within CullMargin of the cone are kept
@@ -708,6 +864,12 @@ static void BuildPacket(Packet& pk)
         float bnd[3][4]; int nb = 0, sig = 0;
         if (cfg.edgeMargin > 0.f) { auto te = g_triEdges.find(it->first); if (te != g_triEdges.end()) for (int e = 0; e < 3; e++) { auto c = g_edgeCnt.find(te->second.key[e]); if (c != g_edgeCnt.end() && c->second == 1) { memcpy(bnd[nb++], te->second.p[e], 16); sig |= 1 << e; } } }
         TriData& td = it->second;
+        if (td.covDirty) {      // plants of a mod-tagged grass triangle under another surface (a road over the terrain): hide them
+            td.covDirty = false;
+            auto gi = cfg.grassMaterialFix ? g_geom.find(it->first) : g_geom.end();
+            const bool inj = gi != g_geom.end() && gi->second.inj;
+            for (Inst& in : td.v) in.cov = inj && CoveredAt(it->first, in.pos) ? 1 : 0;
+        }
         if (td.sig != sig) {      // the edge situation changed (or new plants): recompute the cached edge factors of this triangle
             td.sig = sig;
             for (Inst& in : td.v) {
@@ -730,7 +892,7 @@ static void BuildPacket(Packet& pk)
         }
         for (const Inst& in : td.v) {
             if (cfg.debug && in.model < 4096) g_preCnt[in.model]++;
-            if (in.es < 0.f) continue;
+            if (in.es < 0.f || in.cov) continue;
             float dx = in.pos[0] - cam[0], dy = in.pos[1] - cam[1];
             float d2 = dx * dx + dy * dy;
             if (d2 > R2) continue;
@@ -1071,10 +1233,40 @@ static void __fastcall hGBuild(void* self)
         if (d && !down && GameIsForeground()) { cfg.frustumCull = !cfg.frustumCull; Log("[cull] %s", cfg.frustumCull ? "on" : "off"); HANDLE h = CreateThread(NULL, 0, ToneThread, (LPVOID)(intptr_t)(cfg.frustumCull ? 1200 : 400), 0, NULL); if (h) CloseHandle(h); }
         down = d;
     }
+    if (cfg.grassMaterialFix) {      // forget cover polygons far from the camera (the polygon scan hands them over again when they come back)
+        static DWORD lastEv = 0; DWORD now = GetTickCount();
+        if (now - lastEv > 2000) {
+            lastEv = now; const float* cam = (const float*)A(G.CamPos); std::vector<uint64_t> drop;
+            std::lock_guard<std::mutex> l(g_instMx);
+            for (auto& kv : g_poly) { float cx = (kv.second.x0 + kv.second.x1 + 1) * 0.5f * kCell, cy = (kv.second.y0 + kv.second.y1 + 1) * 0.5f * kCell; if (fabsf(cx - cam[0]) > g_coverRange + 40.f || fabsf(cy - cam[1]) > g_coverRange + 40.f) drop.push_back(kv.first); }
+            for (uint64_t k : drop) PolyRemove(k);
+            for (auto& kv : g_geom) if (kv.second.inj && !kv.second.ents.empty()) g_releaseQ.insert(kv.first);      // re-check game objects of grass triangles now and then
+            static DWORD lastLog = 0; if (cfg.debug && now - lastLog > 30000) { lastLog = now; Log("[cover] %zu cover polygons kept (range %.0f m)", g_poly.size(), (float)g_coverRange); }
+        }
+    }
+    if (cfg.grassMaterialFix && g_mode != 1) {      // regenerate queued triangles the way the game's scan releases one: release it, then free its slot
+        std::vector<std::pair<uintptr_t, std::pair<uintptr_t, uint32_t>>> todo;
+        { std::lock_guard<std::mutex> l(g_instMx);
+          const uintptr_t arrBase = *(uint32_t*)(A(G.PlantMgr) + 0xF30), arrEnd = arrBase + (uintptr_t)(*(uint32_t*)(A(G.PlantMgr) + 0x18)) * 0x60;
+          for (auto it = g_releaseQ.begin(); it != g_releaseQ.end();) {
+              if (todo.size() >= 64) break;      // the rest waits for the next frame
+              const uintptr_t t = *it; it = g_releaseQ.erase(it);
+              auto g = g_geom.find(t); if (g == g_geom.end() || !g->second.rec || t < arrBase || t >= arrEnd || !(((const uint8_t*)t)[0x55] & 4)) continue;
+              bool cov = false; const auto& e = g->second.ents; for (size_t k = 0; k + 2 < e.size() && !cov; k += 3) cov = CoveredAt(t, &e[k]);
+              if (!cov) continue;      // its game objects stand in the open: keep it
+              if (IsBadReadPtr((const void*)(g->second.rec + 0x50), 4)) continue;
+              const uintptr_t slots = *(const uintptr_t*)(g->second.rec + 0x50); if (!slots || IsBadReadPtr((const void*)(slots + g->second.slot * 2), 2)) continue;
+              if (*(const uint16_t*)(slots + g->second.slot * 2) != (uint16_t)((t - arrBase) / 0x60 + 1)) continue;      // the slot must still own this triangle
+              todo.push_back({ t, { slots, g->second.slot } });
+          }
+        }
+        if (!todo.empty()) DBG("[cover] regenerating %zu triangles whose game objects were under a surface", todo.size());
+        for (auto& e : todo) { ((void(__fastcall*)(void*))A(G.TriRelease))((void*)e.first); *(uint16_t*)(e.second.first + e.second.second * 2) = 0; }
+    }
     if (g_modeReq != g_mode) {
         g_mode = g_modeReq;
         ((void(__cdecl*)())A(G.ResetAll))();      // release every plant triangle (as the game does on teleports): everything regenerates under the new mode
-        { std::lock_guard<std::mutex> l(g_instMx); g_byTri.clear(); g_edgeCnt.clear(); g_triEdges.clear(); }
+        { std::lock_guard<std::mutex> l(g_instMx); g_byTri.clear(); g_edgeCnt.clear(); g_triEdges.clear(); g_geom.clear(); g_geomCell.clear(); g_poly.clear(); g_polyCell.clear(); g_releaseQ.clear(); }
         Log("[mode] %s", kModeName[g_mode]);
         HANDLE h = CreateThread(NULL, 0, BeepThread, (LPVOID)(intptr_t)(g_mode + 1), 0, NULL); if (h) CloseHandle(h);
     }
@@ -1131,7 +1323,6 @@ static void LoadMaterialNames(const std::string& path)
 // ---------------------------------------------------------------- grass-material enabling
 // The game bakes a "procedural tag" into every collision polygon.  On PC the tag of almost all grass materials was left empty,
 // so lawns, medians and parks generate no plants.  We give such polygons a vegetation tag (set per material in the INI).
-static bool g_grassMat[256];
 static std::string g_matTagName[256]; static int g_matTagNum[256];
 static volatile LONG g_flagTag[256][256];       // flagged polys: material -> tag histogram (fallback when the INI gives no tag)
 static int GrassTagFor(int mat)
@@ -1206,10 +1397,10 @@ static inline void Words(void* bound, uint32_t poly, uint32_t* w)
 // called from the patch inside the game's polygon scan (see the asm below); returns the "has procedural object" flag
 extern "C" int __cdecl GrassPoly(void* bound, int poly, int b11, int b12, uintptr_t ebpv)
 {
-    (void)ebpv;
     uint32_t w; Words(bound, (uint32_t)poly, &w);
     int mat = w & 0xff, tag = (w >> 8) & 0xff;
     if (b11 || b12) { if (b12 && tag) InterlockedIncrement(&g_flagTag[mat][tag]); return b12; }
+    if (cfg.grassMaterialFix && g_mode != 1 && !g_grassMat[mat]) { std::lock_guard<std::mutex> l(g_instMx); OfferCover((const uint8_t*)bound, *(const uint8_t* const*)(ebpv + 8), (uint32_t)poly); }      // untagged surface: a possible cover
     if (g_mode != 1 && tag == 0 && g_grassMat[mat] && GrassTagFor(mat)) return 1;
     return b12;
 }
@@ -1283,6 +1474,7 @@ static void* __fastcall hBoundAttach(void* self, void* edx, void* owner)
         uint32_t wd; Words((void*)bnd, (uint32_t)i, &wd);       // polygon i of the bound -> its material word
         int mat = wd & 0xff, tag = (wd >> 8) & 0xff;
         if (tag == 0 && g_grassMat[mat] && GrassTagFor(mat)) { int bit = 2 * i + 1; if ((uint32_t)(bit >> 5) < bitWords) bits[bit >> 5] |= 1u << (bit & 31); }
+        else if (tag == 0 && !g_grassMat[mat]) { int bit = 2 * i + 1; if ((uint32_t)(bit >> 5) < bitWords) bits[bit >> 5] |= 1u << (bit & 31); }      // untagged surface: the scan hands it to hTriBuild, which keeps it as a possible cover
     }
     return r;
 }
@@ -1292,8 +1484,16 @@ static TriBuild_t oTriBuild;
 static void __fastcall hTriBuild(void* mgr, void* edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9, uint32_t a10, uint32_t a11)
 {
     int mat = a11 & 0xff;
-    if (g_mode != 1 && ((a11 >> 8) & 0xff) == 0 && g_grassMat[mat]) { int t = GrassTagFor(mat); if (t) a11 |= (uint32_t)t << 8; }
+    if (g_mode != 1 && !g_grassMat[mat]) {      // a non-grass surface (road, pavement): a possible cover, also when its own plant triangle is not live
+        const uint8_t* bnd = (const uint8_t*)(uintptr_t)a3; const uintptr_t polys = bnd ? *(const uintptr_t*)(bnd + 0x8C) : 0;
+        if (polys && a5 >= polys && (a5 - polys) % 32 == 0) { std::lock_guard<std::mutex> l(g_instMx); OfferCover(bnd, (const uint8_t*)(uintptr_t)a2, (uint32_t)((a5 - polys) / 32)); }
+        if (G.v1080 && ((a11 >> 8) & 0xff) == 0) return;      // 1.0.8.0: an untagged surface flagged in hBoundAttach only to be seen here, never a plant triangle
+    }
+    bool inj = false;
+    if (g_mode != 1 && ((a11 >> 8) & 0xff) == 0 && g_grassMat[mat]) { int t = GrassTagFor(mat); if (t) { a11 |= (uint32_t)t << 8; inj = true; } }
+    t_injecting = inj; t_rec = a2; t_slot = a1;      // the triangle itself is created inside this call (hTriNew); a1 = slot, a2 = scan record
     oTriBuild(mgr, edx, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+    t_injecting = false; t_rec = 0; t_slot = 0;      // triangles made elsewhere get no owner
 }
 // triangle created: remember its edges (an edge used by one grass triangle only borders another surface)
 typedef float*(__fastcall* TriNew_t)(float*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
@@ -1301,6 +1501,7 @@ static TriNew_t oTriNew;
 static float* __fastcall hTriNew(float* tri, void* edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8)
 {
     float* r = oTriNew(tri, edx, a1, a2, a3, a4, a5, a6, a7, a8);
+    if (r && cfg.grassMaterialFix) { std::lock_guard<std::mutex> l(g_instMx); GeomAdd((uintptr_t)tri, tri, t_injecting, a4, t_rec, t_slot); }
     if (r && g_grassMat[a4 & 0xff]) {
         TriEdges te; const float* v[3] = { tri, tri + 4, tri + 8 };
         uint64_t q[3]; for (int i = 0; i < 3; i++) q[i] = QPt(v[i][0], v[i][1]);
