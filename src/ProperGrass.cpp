@@ -927,7 +927,7 @@ static uint8_t g_bucketMask[4096];      // buckets in which a model has drawn
 static uint8_t g_emptyMask[4096];       // buckets tried that drew nothing (re-checked every 64 frames)
 // Note: models with meshes in two buckets (e.g. leaves cutout + flower opaque) must draw in BOTH every frame. The old
 // scheme cleared the masks every 600 frames and then throttled the second bucket, so one part of such plants blinked.
-static int g_frameDraws[4096]; static volatile LONG g_lastDraws = 0, g_lastDrawFrames = 0;
+static int g_frameDraws[4096]; static volatile LONG g_totalDraws[4096]; static volatile LONG g_lastDraws = 0, g_lastDrawFrames = 0;
 static void RunGroups(Packet* pk, int bucket)
 {
     if (!EnsureDevice()) return;
@@ -1093,6 +1093,7 @@ static void __fastcall CbDraw(CbDc* dc, void*)
         }
         if (cfg.debug) { g_dbgAttempts = g_dbgAnyDip = g_dbgFailed = g_dbgUploadFail = 0; long t = 0; for (int i = 0; i < 4096; i++) t += g_frameDraws[i]; g_lastDraws = t; if (t > 0) g_lastDrawFrames++; }
         if (cfg.profile && EnsureDevice()) PerfFrame();
+        for (int i = 0; i < 4096; i++) if (g_frameDraws[i] > 0) g_totalDraws[i] += g_frameDraws[i];
         memset(g_frameDraws, 0, sizeof g_frameDraws);
         g_ranMask = 0; g_curPacket = dc->pk; g_renderFrame++;
     }
@@ -1197,7 +1198,7 @@ static void WriteProceduralDump()
     uint32_t n = *(uint32_t*)A(G.ItemCount);
     fprintf(f, "# ProperGrass " PROPERGRASS_VERSION " procedural dump, game %s, uptime %lu s\n", G.name, (unsigned long)(GetTickCount() / 1000));
     fprintf(f, "# items in game table: %u, parsed from procedural.dat: %zu, table check: %d\n", n, g_items.size(), g_tableChecked);
-    fprintf(f, "# columns: idx tagNum tag model(modelinfo index) name class spacing invDensity distGate2 align grid seed flags rot[min,max] scale[min,max] size[min,max] zoff[min,max] resident state seen suppressed draws\n");
+    fprintf(f, "# columns: idx tagNum tag model(modelinfo index) name class spacing invDensity distGate2 align grid seed flags rot[min,max] scale[min,max] size[min,max] zoff[min,max] resident state seen suppressed draws(total instanced draw calls since start)\n");
     fprintf(f, "# class: VEG = plant (instanced, DensityMultiplier/PlantScale apply); PROP = litter/rocks/etc. (instanced, InstanceProps=1); OTHER = left to the game (floating items)\n");
     fprintf(f, "# state: 0 = game entities/probing, 1 = instancing OK, 2 = cannot be instanced; - = not instanced\n\n");
     std::unordered_map<int, std::string> tagName; for (auto& kv : g_tagNum) tagName[kv.second] = kv.first;
@@ -1212,10 +1213,10 @@ static void WriteProceduralDump()
         std::string tg = it ? it->tag : (tagName.count(tagNum) ? tagName[tagNum] : "?");
         auto& pt = perTag[tg]; if (isInst) pt.first++; else pt.second++;
         bool inRange = model >= 0 && model < 4096;
-        fprintf(f, "%3u %3d %-34s %5d %-26s %-5s sp=%.2f inv=%.4f d2=%.0f al=%u grid=%u seed=%u fl=%u rot[%.2f,%.2f] scl[%.2f,%.2f] sz[%.2f,%.2f] zo[%.2f,%.2f] res=%d st=%c seen=%ld supp=%ld draws=%d\n",
+        fprintf(f, "%3u %3d %-34s %5d %-26s %-5s sp=%.2f inv=%.4f d2=%.0f al=%u grid=%u seed=%u fl=%u rot[%.2f,%.2f] scl[%.2f,%.2f] sz[%.2f,%.2f] zo[%.2f,%.2f] res=%d st=%c seen=%ld supp=%ld draws=%ld\n",
             i, tagNum, tg.c_str(), model, it ? it->name : "?", isVeg ? "VEG" : isInst ? "PROP" : "OTHER", fl[2], fl[3], fl[4], r[0x34], r[0x35], r[0x36], r[0x37],
             fl[5], fl[6], fl[7], fl[8], fl[9], fl[10], fl[11], fl[12], inRange && ModelResident(model) ? 1 : 0,
-            isInst && inRange ? '0' + g_mstate[model] : '-', (long)g_itemSeen[i & 255], (long)g_itemSupp[i & 255], isInst && inRange ? g_frameDraws[model] : 0);
+            isInst && inRange ? '0' + g_mstate[model] : '-', (long)g_itemSeen[i & 255], (long)g_itemSupp[i & 255], isInst && inRange ? (long)g_totalDraws[model] : 0L);
     }
     fprintf(f, "\n# summary: %d VEG, %d PROP, %d OTHER items\n# per tag (VEG+PROP/OTHER):", veg, prop, other);
     for (auto& kv : perTag) fprintf(f, " %s=%d/%d", kv.first.c_str(), kv.second.first, kv.second.second);
