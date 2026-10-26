@@ -995,7 +995,7 @@ static void RunGroups(Packet* pk, int bucket)
             int m = unknown[(rr++) % unknown.size()];
             int dir = g_goodDir >= 0 ? g_goodDir : (g_mtries[m] % 6);
             int draws = SampleAttempt(m, dir, bucket);
-            if (draws == -2) { static uint8_t noList[4096]; g_mstate[m] = 2; g_failFrame[m] = (LONG)g_renderFrame;      // the list appears once the model has streamed in: try again later (cheap, nothing is drawn)
+            if (draws == -2) { static uint8_t noList[4096]; g_mstate[m] = 2; g_failFrame[m] = (LONG)g_renderFrame - 1740;      // the list appears once the model has streamed in: try again after ~60 frames (cheap, nothing is drawn)
                  if (noList[m] < 255) noList[m]++; if (noList[m] <= 3) Log("model %d (%s): drawable has no mesh list -> staying on game entities", m, g_mname[m]); continue; }
             if (g_batch.failedDips && draws > 0) draws = 0;      // a model is only confirmed when ALL its meshes instance cleanly
             if (draws > 0) { g_mstate[m] = 1; g_mtries[m] = 0; if (g_goodDir < 0) { g_goodDir = dir; g_goodDirPub = dir; } Log("model %d (%s): probe OK (bucket %d, dir %d) -> instancing enabled", m, g_mname[m], bucket, dir); }
@@ -1181,7 +1181,7 @@ static void __fastcall hGBuild(void* self)
     }
     {   // models that failed their instancing probe are retried every ~30 s of rendering
         static DWORD lastRetry = 0; DWORD now = GetTickCount();
-        if (now - lastRetry > 5000) { lastRetry = now; for (int m = 0; m < 4096; m++) if (g_mstate[m] == 2 && (LONG)g_renderFrame - g_failFrame[m] > 1800) { g_mstate[m] = 0; g_mtries[m] = 0; } }
+        if (now - lastRetry > 500) { lastRetry = now; for (int m = 0; m < 4096; m++) if (g_mstate[m] == 2 && (LONG)g_renderFrame - g_failFrame[m] > 1800) { g_mstate[m] = 0; g_mtries[m] = 0; } }
     }
     AppendMarker(&pk);
 }
