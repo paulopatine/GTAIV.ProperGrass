@@ -31,6 +31,8 @@ static void Log(const char* fmt, ...)
 {
     if (!g_log) return;
     std::lock_guard<std::mutex> l(g_logMx);
+    static DWORD t0 = GetTickCount(); DWORD ms = GetTickCount() - t0;      // seconds since the plugin started: shows how long models take to switch to instancing
+    fprintf(g_log, "[%7.2f] ", ms / 1000.0);
     va_list a; va_start(a, fmt); vfprintf(g_log, fmt, a); va_end(a);
     fputc('\n', g_log); fflush(g_log);
 }
