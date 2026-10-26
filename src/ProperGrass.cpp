@@ -19,7 +19,7 @@
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0, grassMaterialFix = 1, dumpProcedural = 0;
+    int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0, grassMaterialFix = 1, dumpProcedural = 0, instanceProps = 1;
     float drawDistance = 0.f;      // 0 = use the game's plant radius
     float densityMul = 1.f, radiusMul = 1.f, plantScale = 1.f, slopeAlign = 1.f;
     float normalTilt = 0.f; float edgeMargin = 0.5f, edgeSoft = 1.0f, fadeWidth = 12.f;
@@ -209,14 +209,15 @@ static void* MakeHook(uintptr_t target, size_t len, void* detour)
 
 // ---------------------------------------------------------------- vegetation item classification
 static char g_mname[4096][48];
-struct ItemInfo { bool veg = false; char name[48] = {}; char tag[48] = {}; };
+struct ItemInfo { bool veg = false; bool inst = false; char name[48] = {}; char tag[48] = {}; };
 static std::vector<ItemInfo> g_items;       // by table index
 static bool g_itemsValid = false;
 
 static bool IsVegetationModel(const char* n)
 {
     return !_strnicmp(n, "CJ_PROC_PLANT", 13) || !_strnicmp(n, "SM_WEED", 7) || !_strnicmp(n, "SM_BUSH", 7) ||
-           !_strnicmp(n, "SM_PLANT", 8) || !_strnicmp(n, "CJ_DAISY", 8);
+           !_strnicmp(n, "SM_PLANT", 8) || !_strnicmp(n, "CJ_DAISY", 8) ||
+           !_strnicmp(n, "PROC_GRASS", 10) || !_strnicmp(n, "CJ_PROC_WEED", 12);      // ground grass and weeds of sand/dirt areas
 }
 
 static void ParseProcedural(const char* path)
@@ -232,7 +233,7 @@ static void ParseProcedural(const char* path)
         char tag[96], model[96];
         if (sscanf(p, "%95s %95s", tag, model) != 2) continue;
         if (!byTag.count(tag)) tagOrder.push_back(tag);
-        ItemInfo it; strncpy(it.name, model, 47); strncpy(it.tag, tag, 47); it.veg = IsVegetationModel(model);
+        ItemInfo it; strncpy(it.name, model, 47); strncpy(it.tag, tag, 47); it.veg = IsVegetationModel(model); it.inst = it.veg;
         byTag[tag].push_back(it);
     }
     fclose(f);
@@ -333,12 +334,15 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
         if (n) { g_tableChecked = (n == g_items.size()) ? 1 : -1;
             if (g_tableChecked == 1) { std::string lst; for (size_t i = 0; i < g_items.size(); i++) { int tn = (int)*(uint32_t*)((uint8_t*)A(G.ItemTable) + i * 0x44); if (!g_tagNum.count(g_items[i].tag)) { g_tagNum[g_items[i].tag] = tn; lst += " " + std::to_string(tn) + "=" + g_items[i].tag; } } Log("tag numbers:%s", lst.c_str()); }
             Log("item table check: game=%u file=%zu -> %s", n, g_items.size(), g_tableChecked == 1 ? "OK" : "MISMATCH, instancing disabled");
+            if (g_tableChecked == 1 && cfg.instanceProps) {      // litter, rocks and other props use the same path; items that float on water stay game entities
+                int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (!g_items[i].veg && *((uint8_t*)A(G.ItemTable) + i * 0x44 + 0x37) == 0) { g_items[i].inst = true; cnt++; }
+                Log("InstanceProps=1: %d litter/prop items will be instanced too", cnt); }
             if (g_tableChecked == 1 && cfg.densityMul != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* d = (float*)((uint8_t*)A(G.ItemTable) + i * 0x44 + 0xC); *d *= cfg.densityMul; cnt++; } Log("density x%.2f applied to %d vegetation items", cfg.densityMul, cnt); }
             // plant size: scale the item table itself (min/max of width and height), so instanced plants and the few plants
             // that stay ordinary game objects grow or shrink together
             if (g_tableChecked == 1 && cfg.plantScale != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* f = (float*)((uint8_t*)A(G.ItemTable) + i * 0x44 + 0x1C); for (int k = 0; k < 4; k++) f[k] *= cfg.plantScale; cnt++; } Log("plant scale x%.2f applied to %d vegetation items", cfg.plantScale, cnt); } }
     }
-    if (g_tableChecked == 1 && g_itemsValid && idx >= 0 && idx < (int)g_items.size() && g_items[idx].veg) {
+    if (g_tableChecked == 1 && g_itemsValid && idx >= 0 && idx < (int)g_items.size() && g_items[idx].inst) {
         const uint8_t* it = (const uint8_t*)item;
         int model = *(const int*)(it + 4);
         if (model >= 0 && model < 4096) { g_vegSeen[model] = true; if (!g_mname[model][0]) strncpy(g_mname[model], g_items[idx].name, 47); }
@@ -1175,26 +1179,26 @@ static void WriteProceduralDump()
     fprintf(f, "# ProperGrass " PROPERGRASS_VERSION " procedural dump, game %s, uptime %lu s\n", G.name, (unsigned long)(GetTickCount() / 1000));
     fprintf(f, "# items in game table: %u, parsed from procedural.dat: %zu, table check: %d\n", n, g_items.size(), g_tableChecked);
     fprintf(f, "# columns: idx tagNum tag model(modelinfo index) name class spacing invDensity distGate2 align grid seed flags rot[min,max] scale[min,max] size[min,max] zoff[min,max] resident state seen suppressed draws\n");
-    fprintf(f, "# class: VEG = treated as vegetation by the mod (instanced); OTHER = left to the game (litter, props, ...)\n");
-    fprintf(f, "# state: 0 = game entities/probing, 1 = instancing OK, 2 = cannot be instanced; - = not a vegetation item\n\n");
+    fprintf(f, "# class: VEG = plant (instanced, DensityMultiplier/PlantScale apply); PROP = litter/rocks/etc. (instanced, InstanceProps=1); OTHER = left to the game (floating items)\n");
+    fprintf(f, "# state: 0 = game entities/probing, 1 = instancing OK, 2 = cannot be instanced; - = not instanced\n\n");
     std::unordered_map<int, std::string> tagName; for (auto& kv : g_tagNum) tagName[kv.second] = kv.first;
-    int veg = 0, other = 0; std::unordered_map<std::string, std::pair<int, int>> perTag;
+    int veg = 0, prop = 0, other = 0; std::unordered_map<std::string, std::pair<int, int>> perTag;
     for (uint32_t i = 0; i < n && i < 256; i++) {
         const uint8_t* r = (const uint8_t*)A(G.ItemTable) + i * 0x44; if (IsBadReadPtr(r, 0x44)) break;
         bool known = i < g_items.size() && g_tableChecked == 1;
         const ItemInfo* it = known ? &g_items[i] : nullptr;
         int tagNum = *(const int*)r, model = *(const int*)(r + 4);
         const float* fl = (const float*)r;
-        bool isVeg = it && it->veg; if (isVeg) veg++; else other++;
+        bool isVeg = it && it->veg; bool isInst = it && it->inst; if (isVeg) veg++; else if (isInst) prop++; else other++;
         std::string tg = it ? it->tag : (tagName.count(tagNum) ? tagName[tagNum] : "?");
-        auto& pt = perTag[tg]; if (isVeg) pt.first++; else pt.second++;
+        auto& pt = perTag[tg]; if (isInst) pt.first++; else pt.second++;
         bool inRange = model >= 0 && model < 4096;
         fprintf(f, "%3u %3d %-34s %5d %-26s %-5s sp=%.2f inv=%.4f d2=%.0f al=%u grid=%u seed=%u fl=%u rot[%.2f,%.2f] scl[%.2f,%.2f] sz[%.2f,%.2f] zo[%.2f,%.2f] res=%d st=%c seen=%ld supp=%ld draws=%d\n",
-            i, tagNum, tg.c_str(), model, it ? it->name : "?", isVeg ? "VEG" : "OTHER", fl[2], fl[3], fl[4], r[0x34], r[0x35], r[0x36], r[0x37],
+            i, tagNum, tg.c_str(), model, it ? it->name : "?", isVeg ? "VEG" : isInst ? "PROP" : "OTHER", fl[2], fl[3], fl[4], r[0x34], r[0x35], r[0x36], r[0x37],
             fl[5], fl[6], fl[7], fl[8], fl[9], fl[10], fl[11], fl[12], inRange && ModelResident(model) ? 1 : 0,
-            isVeg && inRange ? '0' + g_mstate[model] : '-', (long)g_itemSeen[i & 255], (long)g_itemSupp[i & 255], isVeg && inRange ? g_frameDraws[model] : 0);
+            isInst && inRange ? '0' + g_mstate[model] : '-', (long)g_itemSeen[i & 255], (long)g_itemSupp[i & 255], isInst && inRange ? g_frameDraws[model] : 0);
     }
-    fprintf(f, "\n# summary: %d VEG, %d OTHER items\n# per tag (VEG/OTHER):", veg, other);
+    fprintf(f, "\n# summary: %d VEG, %d PROP, %d OTHER items\n# per tag (VEG+PROP/OTHER):", veg, prop, other);
     for (auto& kv : perTag) fprintf(f, " %s=%d/%d", kv.first.c_str(), kv.second.first, kv.second.second);
     fprintf(f, "\n\n# collision material -> plant tag, as stored in the game's polygons (only materials seen so far)\n");
     for (int m = 0; m < 256; m++) {
@@ -1429,6 +1433,7 @@ static DWORD WINAPI InitThread(LPVOID)
     GetPrivateProfileStringA("Main", "RadiusMultiplier", "1.5", buf, 32, ini.c_str()); cfg.radiusMul = (float)atof(buf);
     cfg.dumpProcedural = GetPrivateProfileIntA("Main", "DumpProcedural", 0, ini.c_str());
     if (cfg.dumpProcedural) g_dumpPath = modDir + "\\ProperGrass.procedural.txt";
+    cfg.instanceProps = GetPrivateProfileIntA("Main", "InstanceProps", 1, ini.c_str());
     cfg.profile = GetPrivateProfileIntA("Main", "Profile", 0, ini.c_str());
     cfg.frustumCull = GetPrivateProfileIntA("Main", "FrustumCull", 1, ini.c_str());
     GetPrivateProfileStringA("Main", "CullKey", "0", buf, 32, ini.c_str()); cfg.cullKey = (int)strtol(buf, nullptr, 0);
