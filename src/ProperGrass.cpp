@@ -861,8 +861,26 @@ static float g_zeroInst[16] = {0};
 // b33 = second globalScalars component, copied from fully visible real vegetation commands.
 static uint8_t g_ambB32 = 255, g_ambB33 = 254;
 static float g_goodDist = 4.0f; static long g_dbgAttempts = 0, g_dbgAnyDip = 0, g_dbgFailed = 0, g_dbgUploadFail = 0;
+// The game's drawable draw (vtable +0x20; one small wrapper per build, see the byte signatures below) walks the mesh list at drawable+0x40. A drawable
+// without that list (some props have no detail-level mesh list) makes the game read a null pointer. Returns false if the model would do that.
+static bool DrawableDrawable(int model)
+{
+    uintptr_t mi, a, d = 0, vt, fn, lst;
+    if (!Rd(A(G.ModelInfoTable) + model * 4, &mi) || !mi || !Rd(mi + 8, &a)) return false;
+    if (a) { if (!Rd(a + 0xB4, &d)) return false; }
+    else { uintptr_t q; if (!Rd(mi + 0xC, &q) || !q || !Rd(q, &d)) return false; }
+    if (!d || !Rd(d, &vt) || !vt || !Rd(vt + 0x20, &fn) || !fn || IsBadReadPtr((void*)fn, 7)) return false;
+    // the same wrapper as the compiler emitted it in each build: 1.2.0.59 / Complete Edition and 1.0.8.0
+    static const BYTE wrapCE[7] = { 0xFF, 0x74, 0x24, 0x10, 0x83, 0xC1, 0x10 };
+    static const BYTE wrap1080[13] = { 0x8B, 0x44, 0x24, 0x10, 0x8B, 0x54, 0x24, 0x08, 0x56, 0x8B, 0x74, 0x24, 0x10 };
+    if (IsBadReadPtr((void*)fn, 13)) return true;
+    if (memcmp((void*)fn, wrapCE, sizeof wrapCE) == 0 || memcmp((void*)fn, wrap1080, sizeof wrap1080) == 0) return Rd(d + 0x40, &lst) && lst != 0;
+    return true;      // another drawable class: nothing known to check
+}
 static int SampleAttempt(int model, int dirChoice, int bucket, float dist = 4.0f)
 {
+    if (model < 0 || model >= 4096) return 0;
+    if (!DrawableDrawable(model)) return -2;
     SampleDc*& sd = g_samples[model];
     if (!sd) sd = new SampleDc();
     const float* camp = (const float*)A(G.CamPos);
@@ -948,6 +966,7 @@ static void RunGroups(Packet* pk, int bucket)
             int m = unknown[(rr++) % unknown.size()];
             int dir = g_goodDir >= 0 ? g_goodDir : (g_mtries[m] % 6);
             int draws = SampleAttempt(m, dir, bucket);
+            if (draws == -2) { static uint8_t noList[4096]; g_mstate[m] = 2; g_failFrame[m] = noList[m] >= 3 ? 0x7fffffff : (LONG)g_renderFrame; if (noList[m] < 255) noList[m]++; if (noList[m] <= 3) Log("model %d (%s): drawable has no mesh list -> staying on game entities", m, g_mname[m]); continue; }
             if (g_batch.failedDips && draws > 0) draws = 0;      // a model is only confirmed when ALL its meshes instance cleanly
             if (draws > 0) { g_mstate[m] = 1; g_mtries[m] = 0; if (g_goodDir < 0) { g_goodDir = dir; g_goodDirPub = dir; } Log("model %d (%s): probe OK (bucket %d, dir %d) -> instancing enabled", m, g_mname[m], bucket, dir); }
             else if (++g_mtries[m] > 6000) { g_mstate[m] = 2; g_failFrame[m] = (LONG)g_renderFrame; Log("model %d (%s): probe failed (draws=%d, tries=%d, resident=%d) -> staying on game entities", m, g_mname[m], draws, g_mtries[m], (int)ModelResident(m)); }
