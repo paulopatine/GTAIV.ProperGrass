@@ -1001,7 +1001,8 @@ static void RunGroups(Packet* pk, int bucket)
                  if (noList[m] < 255) noList[m]++; if (noList[m] <= 3) Log("model %d (%s): drawable has no mesh list -> staying on game entities", m, g_mname[m]); continue; }
             if (g_batch.failedDips && draws > 0) draws = 0;      // a model is only confirmed when ALL its meshes instance cleanly
             if (draws > 0) { g_mstate[m] = 1; g_mtries[m] = 0; if (g_goodDir < 0) { g_goodDir = dir; g_goodDirPub = dir; } Log("model %d (%s): probe OK (bucket %d, dir %d) -> instancing enabled", m, g_mname[m], bucket, dir); }
-            else if (++g_mtries[m] > 6000) { g_mstate[m] = 2; g_failFrame[m] = (LONG)g_renderFrame; Log("model %d (%s): probe failed (draws=%d, tries=%d, resident=%d) -> staying on game entities", m, g_mname[m], draws, g_mtries[m], (int)ModelResident(m)); }
+            else if (++g_mtries[m] > 6000) { static uint8_t failed[4096]; if (ModelResident(m) && failed[m] < 255) failed[m]++; g_mstate[m] = 2; g_failFrame[m] = failed[m] >= 3 ? 0x7fffffff : (LONG)g_renderFrame;      // a loaded model that never draws in 3 full rounds stays on game entities for good
+                Log("model %d (%s): probe failed (draws=%d, tries=%d, resident=%d) -> staying on game entities%s", m, g_mname[m], draws, g_mtries[m], (int)ModelResident(m), failed[m] >= 3 ? " for good" : ""); }
         }
     }
 }
