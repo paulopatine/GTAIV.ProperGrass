@@ -13,6 +13,7 @@ Inspired by *SA Proper Shaders* (GTA SA). Works alongside FusionFix, DXVK and DL
 - **Longer reach with a soft fade.** Plants grow in over the last metres instead of popping in.
 - **Clean borders.** Plants no longer spill onto asphalt or sidewalks.
 - **Plants follow the terrain.** On slopes they grow perpendicular to the ground instead of sticking straight up (adjustable).
+- **Litter and props too.** Ground grass, weeds, rubbish, rocks and other procedural props are drawn as instances as well.
 - **View-cone culling** keeps the GPU cost low.
 
 ## How it differs from "Grass and Procedural Props Fix"
@@ -24,7 +25,7 @@ Inspired by *SA Proper Shaders* (GTA SA). Works alongside FusionFix, DXVK and DL
 | Cost per plant | Same as vanilla: every extra plant is another object and draw call | A few draw calls for all plants of a model |
 | Bare grass surfaces | Not covered by its description | Gives the untagged grass materials (`GRASS`, `SHORT_GRASS`, `GRASS_PATCHY`, `GRASS_LONG`) a plant tag, so parks, medians and slopes that never had plants get them |
 | Edges and fade | Not covered by its description | Keeps plants off asphalt and sidewalks, grows them in at the edge of the radius, culls them outside the camera view |
-| Other procedural objects | Plants, clutter, litter and more, with per-class density filters | Vegetation only |
+| Other procedural objects | Plants, clutter, litter and more, with per-class density filters | Plants, ground grass and weeds, plus litter, rocks and other props (`InstanceProps`, on by default); items that float on water stay with the game |
 | Supported builds | 1.0.4.0 to Complete Edition 1.2.0.59 and VCNGE | Tested on 1.2.0.59 and 1.0.8.0; other CE builds located by code patterns |
 | Safety net | Hash check, startup validation, rollback | Signature check of the executable, disables itself on mismatch |
 
@@ -50,10 +51,11 @@ Copy `GTAIV.ProperGrass.asi` and `ProperGrass.ini` into the `plugins` folder nex
 | `TriCapacity` | 16384 | Active plant triangles |
 | `EdgeMargin` / `EdgeSoft` | 0.5 / 1.0 | Keeps plants away from the border of a grass area |
 | `FrustumCull` | 1 | Skip plants outside the camera view |
+| `InstanceProps` | 1 | Also instance litter, rocks and other procedural props. Set 0 to keep them as ordinary game objects |
 | `GrassMaterialFix` | 1 | Give plants to grass surfaces the game ships without any. Set 0 if another mod (e.g. Various Fixes) already fixes them |
 | `GrassMaterials` | see file | `NAME@TAG` list of grass materials (plants for them, and edge handling) |
 
-Diagnostics: `Debug=1` writes extra detail to `ProperGrass.log`. `Profile=1` shows an on-screen performance panel;
+Diagnostics: every line of `ProperGrass.log` starts with the seconds since the plugin loaded. `Debug=1` writes extra detail to it. `DumpProcedural=1` writes `ProperGrass.procedural.txt` (every `procedural.dat` item, whether its model is instanced, how many were seen and suppressed, and the plant tag of each collision material), updated every minute. `Profile=1` shows an on-screen performance panel;
 with `ToggleKey=0x76` (F7) you can switch live between **MOD**, **VANILLA** and **NO-INSTANCING**, and `CullKey=0x77` (F8) toggles culling.
 
 ## Performance
@@ -68,7 +70,8 @@ The mod costs roughly 0.2-0.4 ms on the main thread, under 0.1 ms on the render 
 
 ## Known limitations
 - The airport-highway median has concrete collision under its grass, so it stays bare.
-- A few plant models cannot be instanced and remain ordinary game objects.
+- A few models cannot be instanced and remain ordinary game objects (for example `cj_proc_brick8/9`, `CJ_PROC_BRICK10` and `cj_proc_needle`, the last one added by Props Restoration).
+- A plant switches to instancing only after the game has streamed its model in, so for a few seconds after loading a save or entering a new area some of the game's own grass can show first.
 - Grass looks as glossy under car headlights as in vanilla; custom lighting is not part of this release.
 - Tested only on 1.2.0.59 and 1.0.8.0; other builds are untested.
 
