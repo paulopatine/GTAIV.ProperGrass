@@ -5,7 +5,7 @@ It fixes the game's long-standing grass problem: many grass surfaces never get p
 plant objects, pop in and vanish at some camera angles. The mod keeps the game's own plants and its own look, but draws them
 with hardware instancing, so a far denser, longer-reaching lawn costs a handful of draw calls.
 
-Inspired by *SA Proper Shaders* (GTA SA). Works alongside FusionFix, DXVK and DLSS-IV.
+Inspired by *SA Proper Shaders* (GTA SA). Works alongside FusionFix, DXVK, DLSS-IV and Various Fixes.
 
 ## What it does
 - **Grass where the game left none.** The grass materials (`GRASS`, `SHORT_GRASS`, `GRASS_PATCHY`, `GRASS_LONG`) ship without a procedural tag, so parks, medians and slopes stay bare. The mod gives them one.
