@@ -1410,11 +1410,11 @@ static void InstallGrassHooks()
         oBoundGate = (BoundGate_t)MakeHook(A(G.BoundGate), G.lenGate, (void*)&hBoundGate);
         oTriBuild = (TriBuild_t)MakeHook(A(G.TriBuild), G.lenBuild, (void*)&hTriBuild);
         if (G.v1080) {      // 1.0.8.0: the per-polygon "has plants" bits are built when a collision object is attached: add the grass polygons there
-            if (*(BYTE*)A(G.BoundAttach) == 0x8B) oBoundAttach = (BoundAttach_t)MakeHook(A(G.BoundAttach), G.lenAttach, (void*)&hBoundAttach);
+            if (prologueOk(G.BoundAttach, 0x8B)) oBoundAttach = (BoundAttach_t)MakeHook(A(G.BoundAttach), G.lenAttach, (void*)&hBoundAttach);
             else Log("bound attach prologue mismatch: grass polygons without a tag will not get plants");
         }
     } else Log("GrassMaterialFix=0: grass materials keep the game's own plant tags (edge culling still uses the list)");
-    if (*(BYTE*)A(G.TriNew) == G.tnByte) oTriNew = (TriNew_t)MakeHook(A(G.TriNew), G.lenNew, (void*)&hTriNew); else Log("tri-new prologue mismatch, edge culling off");
+    if (prologueOk(G.TriNew, G.tnByte)) oTriNew = (TriNew_t)MakeHook(A(G.TriNew), G.lenNew, (void*)&hTriNew); else Log("tri-new prologue mismatch, edge culling off");
 }
 
 // ---------------------------------------------------------------- crash forensics
@@ -1499,10 +1499,12 @@ static DWORD WINAPI InitThread(LPVOID)
     {
         auto chk = [&](const char* n, bool ok) { Log("check %-12s %s", n, ok ? "ok" : "FAIL"); return ok; };
         Log("base=%08x delta=%08x", (unsigned)g_base, (unsigned)(g_base - 0x400000));
+        // A function entry may already start with a jmp (E9) written by another plugin: that still counts as the expected function.
+        auto entry = [&](uintptr_t va, uint8_t want) { BYTE b = *(BYTE*)A(va); return b == want || b == 0xE9; };
         auto matches = [&](const GameAddrs& g) {
-            return *(BYTE*)A(g.Reset) == 0xB9 && *(uint32_t*)A(g.Reset + 1) == A(g.PlantMgr) && *(uint32_t*)A(g.TriCapImm) == 0x200 &&
-                   (*(BYTE*)A(g.GBufferBuild) == 0x51 || *(BYTE*)A(g.GBufferBuild) == 0xE9) && *(BYTE*)A(g.CandidateAdd) == 0x55 &&
-                   (*(BYTE*)A(g.EntDraw) == 0x55 || *(BYTE*)A(g.EntDraw) == 0xE9) && *(BYTE*)A(g.TriRelease) != 0 ;
+            const BYTE r = *(BYTE*)A(g.Reset);
+            return ((r == 0xB9 && *(uint32_t*)A(g.Reset + 1) == A(g.PlantMgr)) || r == 0xE9) && *(uint32_t*)A(g.TriCapImm) == 0x200 &&
+                   entry(g.GBufferBuild, 0x51) && entry(g.CandidateAdd, 0x55) && entry(g.EntDraw, 0x55) && *(BYTE*)A(g.TriRelease) != 0;
         };
         bool ok = false;
         auto readable = [&](const GameAddrs& g) { return !IsBadReadPtr((void*)A(g.Reset), 8) && !IsBadReadPtr((void*)A(g.TriCapImm), 4) && !IsBadReadPtr((void*)A(g.CandidateAdd), 4); };
