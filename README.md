@@ -55,7 +55,7 @@ Copy `GTAIV.ProperGrass.asi` and `ProperGrass.ini` into the `plugins` folder nex
 | `GrassMaterialFix` | 1 | Give plants to grass surfaces the game ships without any. Set 0 if another mod (e.g. Various Fixes) already fixes them |
 | `GrassMaterials` | see file | `NAME@TAG` list of grass materials (plants for them, and edge handling) |
 
-Diagnostics: every line of `ProperGrass.log` starts with the seconds since the plugin loaded. `Debug=1` writes extra detail to it. `DumpProcedural=1` writes `ProperGrass.procedural.txt` (every `procedural.dat` item, whether its model is instanced, how many were seen and suppressed, and the plant tag of each collision material), updated every minute. `Profile=1` shows an on-screen performance panel;
+Diagnostics: every line of `ProperGrass.log` starts with the seconds since the plugin loaded. `Debug=1` writes extra detail to it. `DumpProcedural=1` writes `ProperGrass.procedural.txt` (every `procedural.dat` item, whether its model is instanced, how many were seen and suppressed, and the plant tag of each collision material), updated every minute. `Profile=1` writes `[perf]` lines (frame rate, instanced draws and instances for plants and for props, update cost) to the log every couple of seconds, without drawing anything on screen;
 with `ToggleKey=0x76` (F7) you can switch live between **MOD**, **VANILLA** and **NO-INSTANCING**, and `CullKey=0x77` (F8) toggles culling.
 
 ## Performance

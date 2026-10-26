@@ -49,8 +49,8 @@ static volatile LONGLONG g_tCand = 0, g_tGameList = 0, g_tPacket = 0;
 static volatile LONG g_nCand = 0, g_nEnt = 0, g_nUpd = 0;
 static volatile float g_aspect = 16.f / 9.f;
 static LONG g_renderFrame = 0;
-static char g_ovl[2][256]; static std::mutex g_ovlMx;
-static LONGLONG g_tRun = 0; static LONG g_dipAll = 0, g_dipOurs = 0; static LONGLONG g_instDrawn = 0;
+static LONGLONG g_tRun = 0; static LONG g_dipAll = 0, g_dipOurs = 0, g_dipProp = 0; static LONGLONG g_instDrawn = 0, g_instProp = 0;      // draws and instances: total, and the share that belongs to litter/props
+static uint8_t g_isProp[4096];      // model -> 1 when it comes from a litter/prop item (not a plant)
 
 // ---------------------------------------------------------------- game addresses (1.2.0.59)
 // Game addresses per executable version. Filled by DetectVersion() once; all are virtual addresses for image base 0x400000.
@@ -376,7 +376,7 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
     if (g_tableChecked == 1 && g_itemsValid && idx >= 0 && idx < (int)g_items.size() && g_items[idx].inst) {
         const uint8_t* it = (const uint8_t*)item;
         int model = *(const int*)(it + 4);
-        if (model >= 0 && model < 4096) { g_vegSeen[model] = true; if (!g_mname[model][0]) strncpy(g_mname[model], g_items[idx].name, 47); }
+        if (model >= 0 && model < 4096) { g_vegSeen[model] = true; g_isProp[model] = g_items[idx].veg ? 0 : 1; if (!g_mname[model][0]) strncpy(g_mname[model], g_items[idx].name, 47); }
         if (model >= 0 && model < 4096 && g_mstate[model] != 1) { std::lock_guard<std::mutex> l(g_instMx); g_seenModels.insert(model); }
         static LONG s_pass[4096];
         bool doSupp = false; if (g_mode == 0 && model >= 0 && model < 4096 && g_mstate[model] != 2 && ModelResident(model)) { LONG pc = InterlockedIncrement(&s_pass[model]); doSupp = (pc & 31) != 0; /* 1 in 32 stays a real game entity: keeps the model referenced/streamed in */ }
@@ -613,6 +613,7 @@ static HRESULT STDMETHODCALLTYPE hDIP(IDirect3DDevice9* d, D3DPRIMITIVETYPE pt, 
         d->SetStreamSource(1, nullptr, 0, 0);
         d->SetVertexShader(vs); d->SetVertexDeclaration(decl);
         g_batch.draws++; g_dipOurs++; g_instDrawn += g_batch.count;
+        if (g_batch.model >= 0 && g_batch.model < 4096 && g_isProp[g_batch.model]) { g_dipProp++; g_instProp += g_batch.count; }
     }
     if (vs) vs->Release(); if (decl) decl->Release();
     return hr;
@@ -622,82 +623,15 @@ static HRESULT STDMETHODCALLTYPE hDIP(IDirect3DDevice9* d, D3DPRIMITIVETYPE pt, 
 struct GpuSlot { IDirect3DQuery9* q[8] = {}; int n = 0; };
 static GpuSlot g_gs[4]; static IDirect3DQuery9* g_freqQ; static UINT64 g_gpuFreq; static double g_gpuMs = 0; static int g_gpuFrames = 0;
 static void GpuReleaseAll() { for (auto& s : g_gs) { for (auto*& q : s.q) if (q) { q->Release(); q = nullptr; } s.n = 0; } if (g_freqQ) { g_freqQ->Release(); g_freqQ = nullptr; } g_gpuFreq = 0; }
-// on-screen panel (D3DX font, drawn just before Present with the game's state saved and restored)
-struct ID3DXFontLite : IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE GetDevice(void**) = 0; virtual HRESULT STDMETHODCALLTYPE GetDescA(void*) = 0; virtual HRESULT STDMETHODCALLTYPE GetDescW(void*) = 0;
-    virtual BOOL STDMETHODCALLTYPE GetTextMetricsA(void*) = 0; virtual BOOL STDMETHODCALLTYPE GetTextMetricsW(void*) = 0; virtual HDC STDMETHODCALLTYPE GetDC() = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetGlyphData(UINT, void**, RECT*, POINT*) = 0; virtual HRESULT STDMETHODCALLTYPE PreloadCharacters(UINT, UINT) = 0; virtual HRESULT STDMETHODCALLTYPE PreloadGlyphs(UINT, UINT) = 0;
-    virtual HRESULT STDMETHODCALLTYPE PreloadTextA(LPCSTR, INT) = 0; virtual HRESULT STDMETHODCALLTYPE PreloadTextW(LPCWSTR, INT) = 0;
-    virtual INT STDMETHODCALLTYPE DrawTextA(void*, LPCSTR, INT, LPRECT, DWORD, D3DCOLOR) = 0; virtual INT STDMETHODCALLTYPE DrawTextW(void*, LPCWSTR, INT, LPRECT, DWORD, D3DCOLOR) = 0;
-    virtual HRESULT STDMETHODCALLTYPE OnLostDevice() = 0; virtual HRESULT STDMETHODCALLTYPE OnResetDevice() = 0;
-};
-typedef HRESULT(WINAPI* PFN_CreateFont)(IDirect3DDevice9*, INT, UINT, UINT, UINT, BOOL, DWORD, DWORD, DWORD, DWORD, LPCSTR, ID3DXFontLite**);
-static ID3DXFontLite* g_font; static IDirect3DStateBlock9* g_sb; static bool g_fontFailed;
-static void DrawOverlay(IDirect3DDevice9* d)
-{
-    if (g_fontFailed) return;
-    if (!g_font) {
-        PFN_CreateFont cf = (LoadD3DX() && g_d3dx) ? (PFN_CreateFont)GetProcAddress(g_d3dx, "D3DXCreateFontA") : nullptr;
-        IDirect3DSurface9* bb = nullptr; D3DSURFACE_DESC bd = {}; if (SUCCEEDED(d->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb) { bb->GetDesc(&bd); bb->Release(); }
-        int h = bd.Height ? (int)(bd.Height / 1080.0 * 20) : 20; if (h < 14) h = 14;
-        if (!cf || FAILED(cf(d, h, 0, FW_BOLD, 1, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Consolas", &g_font)) || !g_font) { g_fontFailed = true; g_font = nullptr; Log("overlay: font not available"); return; }
-    }
-    if (!g_sb && FAILED(d->CreateStateBlock(D3DSBT_ALL, &g_sb))) { g_sb = nullptr; return; }
-    char l0[256], l1[256]; { std::lock_guard<std::mutex> l(g_ovlMx); memcpy(l0, g_ovl[0], 256); memcpy(l1, g_ovl[1], 256); }
-    if (!l0[0]) return;
-    static bool first = true;
-    g_sb->Capture();
-    IDirect3DSurface9* rt[4] = {}; IDirect3DSurface9* ds = nullptr; IDirect3DSurface9* bb = nullptr;
-    for (int i = 0; i < 4; i++) d->GetRenderTarget(i, &rt[i]);
-    d->GetDepthStencilSurface(&ds);
-    if (SUCCEEDED(d->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb) {
-        d->SetRenderTarget(0, bb); for (int i = 1; i < 4; i++) d->SetRenderTarget(i, nullptr); d->SetDepthStencilSurface(nullptr);
-        D3DSURFACE_DESC bd = {}; bb->GetDesc(&bd);
-        int y = (int)(bd.Height * 0.10), lh = (int)(bd.Height / 1080.0 * 24);
-        if (first) { first = false; Log("overlay: first draw on %ux%u back buffer", bd.Width, bd.Height); }
-        if (SUCCEEDED(d->BeginScene())) {
-            const char* ls[2] = { l0, l1 };
-            for (int i = 0; i < 2; i++) {
-                RECT r = { 22, y + i * lh + 2, (LONG)bd.Width, y + i * lh + lh + 2 }; g_font->DrawTextA(nullptr, ls[i], -1, &r, DT_LEFT | DT_NOCLIP, 0xC0000000);
-                RECT q = { 20, y + i * lh, (LONG)bd.Width, y + i * lh + lh }; g_font->DrawTextA(nullptr, ls[i], -1, &q, DT_LEFT | DT_NOCLIP, i ? 0xFFFFFFFF : 0xFF7CFC7C);
-            }
-            d->EndScene();
-        }
-        bb->Release();
-    }
-    for (int i = 0; i < 4; i++) { d->SetRenderTarget(i, rt[i]); if (rt[i]) rt[i]->Release(); }
-    d->SetDepthStencilSurface(ds); if (ds) ds->Release();
-    g_sb->Apply();
-}
-typedef HRESULT(STDMETHODCALLTYPE* Present_t)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
-static LONG g_ovlDrawnFrame = -1; static LONG g_presDev = 0, g_presSc = 0;
-static void OverlayOnce(IDirect3DDevice9* d) { if (!cfg.profile || g_ovlDrawnFrame == g_renderFrame) return; g_ovlDrawnFrame = g_renderFrame; DrawOverlay(d); }
-static HRESULT STDMETHODCALLTYPE hPresent(IDirect3DDevice9* d, const RECT* a, const RECT* b, HWND w, const RGNDATA* r)
-{
-    if (g_presDev++ == 0) Log("overlay: device Present called");
-    OverlayOnce(d);
-    return ((Present_t)g_vtblOrig[17])(d, a, b, w, r);
-}
-typedef HRESULT(STDMETHODCALLTYPE* ScPresent_t)(IDirect3DSwapChain9*, const RECT*, const RECT*, HWND, const RGNDATA*, DWORD);
-static ScPresent_t oScPresent;
-static HRESULT STDMETHODCALLTYPE hScPresent(IDirect3DSwapChain9* sc, const RECT* a, const RECT* b, HWND w, const RGNDATA* r, DWORD fl)
-{
-    if (g_presSc++ == 0) Log("overlay: swapchain Present called");
-    IDirect3DDevice9* d = nullptr; if (SUCCEEDED(sc->GetDevice(&d)) && d) { OverlayOnce(d); d->Release(); }
-    return oScPresent(sc, a, b, w, r, fl);
-}
 static HRESULT STDMETHODCALLTYPE hReset(IDirect3DDevice9* d, D3DPRESENT_PARAMETERS* pp)
 {
     GpuReleaseAll();
-    if (g_sb) { g_sb->Release(); g_sb = nullptr; }
-    if (g_font) g_font->OnLostDevice();
     if (g_instVB) { g_instVB->Release(); g_instVB = nullptr; }
     for (auto& v : g_vsCache) if (v.second.vs) v.second.vs->Release();
     g_vsCache.clear();
     for (auto& v : g_declCache) if (v.second) v.second->Release();
     g_declCache.clear();
     HRESULT hr = ((Reset_t)g_vtblOrig[16])(d, pp);
-    if (g_font && SUCCEEDED(hr)) g_font->OnResetDevice();
     if (SUCCEEDED(hr) && pp && pp->BackBufferHeight) g_aspect = (float)pp->BackBufferWidth / pp->BackBufferHeight;
     return hr;
 }
@@ -717,15 +651,7 @@ static bool EnsureDevice()
     if (!d || IsBadReadPtr(d, 4)) return false;
     g_dev = d;
     { IDirect3DSurface9* bb = nullptr; D3DSURFACE_DESC bd = {}; if (SUCCEEDED(d->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb) { bb->GetDesc(&bd); bb->Release(); if (bd.Height) g_aspect = (float)bd.Width / bd.Height; } }
-    bool ok = PatchVtable(82, (void*)&hDIP) && PatchVtable(16, (void*)&hReset) && (!cfg.profile || PatchVtable(17, (void*)&hPresent));
-    if (cfg.profile) {      // some setups present through the swap chain object instead of the device
-        IDirect3DSwapChain9* sc = nullptr;
-        if (SUCCEEDED(d->GetSwapChain(0, &sc)) && sc) {
-            void** vt = *(void***)sc; DWORD old;
-            if (VirtualProtect(&vt[3], 4, PAGE_READWRITE, &old)) { oScPresent = (ScPresent_t)vt[3]; vt[3] = (void*)&hScPresent; VirtualProtect(&vt[3], 4, old, &old); }
-            sc->Release();
-        }
-    }
+    bool ok = PatchVtable(82, (void*)&hDIP) && PatchVtable(16, (void*)&hReset);
     Log("device %p hooks %s", d, ok ? "ok" : "FAILED");
     return ok;
 }
@@ -1031,11 +957,9 @@ static void PerfFrame()
     LONGLONG now = Qpc();
     static int lastCull = -1; if (cfg.frustumCull != lastCull) { lastCull = cfg.frustumCull; lastMode = -1; }
     if (g_mode != lastMode) {      // new mode: drop the partial window so modes never mix
-        lastMode = g_mode; modeSince = now; ft.clear(); winStart = now; dipFrames = 0; g_tRun = 0; g_dipAll = g_dipOurs = 0; g_instDrawn = 0; g_gpuMs = 0; g_gpuFrames = 0;
+        lastMode = g_mode; modeSince = now; ft.clear(); winStart = now; dipFrames = 0; g_tRun = 0; g_dipAll = g_dipOurs = g_dipProp = 0; g_instDrawn = g_instProp = 0; g_gpuMs = 0; g_gpuFrames = 0;
         InterlockedExchange(&g_nUpd, 0); InterlockedExchange64(&g_tGameList, 0); InterlockedExchange64(&g_tPacket, 0); InterlockedExchange64(&g_tCand, 0); InterlockedExchange(&g_nCand, 0); InterlockedExchange(&g_nEnt, 0);
-        std::lock_guard<std::mutex> l(g_ovlMx); snprintf(g_ovl[1], sizeof g_ovl[1], "medindo...");
     }
-    { std::lock_guard<std::mutex> l(g_ovlMx); snprintf(g_ovl[0], sizeof g_ovl[0], "Proper Grass  |  modo: %s  |  culling: %s  |  %.0f s neste modo%s", kModeName[g_mode], cfg.frustumCull ? "on" : "off", Ms(now - modeSince) / 1000.0, Ms(now - modeSince) < 6000.0 ? "  (aguarde, regenerando)" : ""); }
     if (last) ft.push_back((float)Ms(now - last));
     last = now; if (!winStart) winStart = now;
     dipFrames++;
@@ -1056,11 +980,9 @@ static void PerfFrame()
     double tl = Ms(InterlockedExchange64(&g_tGameList, 0)) / nU, tp = Ms(InterlockedExchange64(&g_tPacket, 0)) / nU, tc = Ms(InterlockedExchange64(&g_tCand, 0)) / nU;
     LONG nc = InterlockedExchange(&g_nCand, 0), ne = InterlockedExchange(&g_nEnt, 0);
     double secs = Ms(now - winStart) / 1000.0; int nf = dipFrames;
-    Log("[perf] %s cull=%d presents=%ld/%ld | frames=%d fps=%.1f frametime avg=%.2f p99=%.2f max=%.2f ms | render: grass cpu=%.3f ms gpu=%s%.3f ms, draws/frame=%.0f (grass %.1f, %.0f inst) | update: game render list=%.3f ms, grass packet=%.3f ms, plant candidates=%.3f ms (%.0f/s, %.0f new game entities/s)",
-        kModeName[g_mode], cfg.frustumCull, g_presDev, g_presSc, nf, v.size() / (sum / 1000.0), avg, p99, mx, Ms(g_tRun) / nf, g_gpuFrames ? "" : "n/a ", g_gpuFrames ? g_gpuMs / g_gpuFrames : 0.0, (double)g_dipAll / nf, (double)g_dipOurs / nf, (double)g_instDrawn / nf, tl, tp, tc, nc / secs, ne / secs);
-    { std::lock_guard<std::mutex> l(g_ovlMx); snprintf(g_ovl[1], sizeof g_ovl[1], "FPS %.0f (1%% pior %.0f)  |  grama: GPU %s%.2f ms, CPU %.2f ms, %.0f plantas  |  draws/frame %.0f  |  update %.2f ms, %.0f objetos novos/s",
-        v.size() / (sum / 1000.0), 1000.0 / p99, g_gpuFrames ? "" : "n/d ", g_gpuFrames ? g_gpuMs / g_gpuFrames : 0.0, Ms(g_tRun) / nf, (double)g_instDrawn / nf, (double)g_dipAll / nf, tl + tp + tc, ne / secs); }
-    ft.clear(); winStart = now; dipFrames = 0; g_tRun = 0; g_dipAll = g_dipOurs = 0; g_instDrawn = 0; g_gpuMs = 0; g_gpuFrames = 0;
+    Log("[perf] %s cull=%d | frames=%d fps=%.1f frametime avg=%.2f p99=%.2f max=%.2f ms | render: instanced plants+props cpu=%.3f ms gpu=%s%.3f ms, draws/frame=%.0f (instanced %.1f of which props %.1f; %.0f instances, props %.0f) | update: game render list=%.3f ms, instance packet=%.3f ms, candidates=%.3f ms (%.0f/s, %.0f new game entities/s)",
+        kModeName[g_mode], cfg.frustumCull, nf, v.size() / (sum / 1000.0), avg, p99, mx, Ms(g_tRun) / nf, g_gpuFrames ? "" : "n/a ", g_gpuFrames ? g_gpuMs / g_gpuFrames : 0.0, (double)g_dipAll / nf, (double)g_dipOurs / nf, (double)g_dipProp / nf, (double)g_instDrawn / nf, (double)g_instProp / nf, tl, tp, tc, nc / secs, ne / secs);
+    ft.clear(); winStart = now; dipFrames = 0; g_tRun = 0; g_dipAll = g_dipOurs = g_dipProp = 0; g_instDrawn = g_instProp = 0; g_gpuMs = 0; g_gpuFrames = 0;
 }
 
 static void __fastcall hEntDraw(void* dc)
