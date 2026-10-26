@@ -170,6 +170,35 @@ static bool ResolveCEPatterns(GameAddrs& g)
     }
     return fails == 0;
 }
+// Sanity check for a build found by patterns. The patterns already identify the code (they are long and must match exactly one place),
+// so what is left to verify is that the first bytes of every function we detour are the ones we copy into the trampoline.
+// A function that another plugin already detoured (starts with E9) is fine: MakeHook chains through it.
+static bool PatternBuildOk(const GameAddrs& g)
+{
+    struct P { const char* n; uintptr_t va; int len; const char* bytes; };
+    const P ps[] = {
+        { "CandidateAdd", g.CandidateAdd, g.lenCand,  "55 8B EC 83 E4 F0 8B D1" },
+        { "TriRelease",   g.TriRelease,   g.lenRel,   "56 8B F1 F6 46 55 04" },
+        { "TriNew",       g.TriNew,       g.lenNew,   "55 8B EC 83 E4 F0 83 EC 18" },
+        { "TriBuild",     g.TriBuild,     g.lenBuild, "55 8B EC 83 E4 F0 81 EC E8 00 00 00" },
+        { "BoundGate",    g.BoundGate,    g.lenGate,  "53 55 8B 6C 24 0C 8B CD" },
+        { "GBufferBuild", g.GBufferBuild, g.lenGBuild,"51 56 8B F1 83 BE 38 09 00 00 FF" },
+        { "EntDraw",      g.EntDraw,      g.lenEnt,   "55 8B EC 83 E4 F0" },
+    };
+    bool ok = true;
+    for (const P& p : ps) {
+        const BYTE* t = (const BYTE*)A(p.va);
+        if (IsBadReadPtr(t, 16)) { Log("  %-12s not readable", p.n); ok = false; continue; }
+        if (t[0] == 0xE9) continue;                       // already detoured by another plugin
+        std::vector<uint8_t> b, m; ParsePattern(p.bytes, b, m);
+        if ((int)b.size() != p.len || memcmp(t, b.data(), b.size()) != 0) { Log("  %-12s starts with different bytes than the supported builds (%02x %02x %02x %02x)", p.n, t[0], t[1], t[2], t[3]); ok = false; }
+    }
+    const BYTE* r = (const BYTE*)A(g.Reset);
+    if (IsBadReadPtr(r, 8)) { Log("  Reset not readable"); ok = false; }
+    else if (r[0] != 0xE9 && !(r[0] == 0xB9 && *(const uint32_t*)(r + 1) == A(g.PlantMgr))) { Log("  Reset starts with different bytes than the supported builds (%02x %02x %02x %02x %02x)", r[0], r[1], r[2], r[3], r[4]); ok = false; }
+    if (IsBadReadPtr((void*)A(g.TriCapImm), 4) || *(const uint32_t*)A(g.TriCapImm) != 0x200) { Log("  triangle capacity immediate is not 0x200"); ok = false; }
+    return ok;
+}
 // fields that must agree between the pattern result and the known 1.2.0.59 table
 static int CompareToTable(const GameAddrs& a, const GameAddrs& t)
 {
@@ -1372,7 +1401,8 @@ static void InstallGrassHooks()
         }
         p = q + 1;
     }
-    if (*(BYTE*)A(G.BoundGate) != G.bgByte || *(BYTE*)A(G.TriBuild) != G.tbByte) { Log("grass hooks: unexpected prologue, not installed"); return; }
+    auto prologueOk = [](uintptr_t va, uint8_t want) { BYTE b = *(BYTE*)A(va); return b == want || b == 0xE9; };      // E9: already detoured by another plugin, MakeHook chains
+    if (!prologueOk(G.BoundGate, G.bgByte) || !prologueOk(G.TriBuild, G.tbByte)) { Log("grass hooks: unexpected prologue, not installed"); return; }
     if (cfg.grassMaterialFix) {      // give the listed grass materials a plant tag (off: leave the game's tags alone, e.g. when another mod fixes them)
         oBoundGate = (BoundGate_t)MakeHook(A(G.BoundGate), G.lenGate, (void*)&hBoundGate);
         oTriBuild = (TriBuild_t)MakeHook(A(G.TriBuild), G.lenBuild, (void*)&hTriBuild);
@@ -1481,7 +1511,7 @@ static DWORD WINAPI InitThread(LPVOID)
         else if (readable(k1080) && matches(k1080)) { G = k1080; ok = true; }
         else {      // another build of the Complete Edition (for example 1.2.0.43): find everything by pattern
             GameAddrs pr;
-            if (ResolveCEPatterns(pr) && matches(pr)) { G = pr; G.name = "Complete Edition (found by patterns)"; ok = true; }
+            if (ResolveCEPatterns(pr) && PatternBuildOk(pr)) { G = pr; G.name = "Complete Edition (found by patterns)"; ok = true; }
             else Log("pattern search did not find a supported Complete Edition build");
         }
         chk("executable", ok);
