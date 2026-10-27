@@ -17,6 +17,8 @@
 #include <mutex>
 #include <algorithm>
 
+static constexpr int kMaxModels = 4096;      // size of the game's model table: every per-model array below is indexed by model id
+
 // ---------------------------------------------------------------- config / log
 static struct {
     int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0, grassMaterialFix = 1, dumpProcedural = 0, instanceProps = 1;
@@ -50,7 +52,7 @@ static volatile LONG g_nCand = 0, g_nEnt = 0, g_nUpd = 0;
 static volatile float g_aspect = 16.f / 9.f;
 static LONG g_renderFrame = 0;
 static LONGLONG g_tRun = 0; static LONG g_dipAll = 0, g_dipOurs = 0, g_dipProp = 0; static LONGLONG g_instDrawn = 0, g_instProp = 0;      // draws and instances: total, and the share that belongs to litter/props
-static uint8_t g_isProp[4096];      // model -> 1 when it comes from a litter/prop item (not a plant)
+static uint8_t g_isProp[kMaxModels];      // model -> 1 when it comes from a litter/prop item (not a plant)
 
 // ---------------------------------------------------------------- game addresses (1.2.0.59)
 // Game addresses per executable version. Filled by DetectVersion() once; all are virtual addresses for image base 0x400000.
@@ -239,7 +241,7 @@ static void* MakeHook(uintptr_t target, size_t len, void* detour)
 }
 
 // ---------------------------------------------------------------- vegetation item classification
-static char g_mname[4096][48];
+static char g_mname[kMaxModels][48];
 struct ItemInfo { bool veg = false; bool inst = false; char name[48] = {}; char tag[48] = {}; };
 static std::vector<ItemInfo> g_items;       // by table index
 static bool g_itemsValid = false;
@@ -323,7 +325,7 @@ static std::unordered_set<int> g_badModels;                          // models w
 static std::unordered_set<int> g_seenModels;
 static volatile LONG g_candCount = 0, g_candSuppressed = 0;
 static std::mutex g_badMx;
-static bool g_vegSeen[4096];
+static bool g_vegSeen[kMaxModels];
 static bool Rd(uintptr_t p, uintptr_t* o) { if (!p || IsBadReadPtr((void*)p, 4)) return false; *o = *(uintptr_t*)p; return true; }
 static bool ModelResident(int m) {
     uintptr_t mi, a, p;
@@ -334,9 +336,9 @@ static bool ModelResident(int m) {
 }
 static int GrassTagFor(int mat);
 static std::unordered_map<std::string, int> g_tagNum;
-static LONG g_failFrame[4096];
-static uint8_t g_mstate[4096];   // 0 unknown (game entities + probing), 1 instancing OK (candidates suppressed), 2 gave up
-static int g_mtries[4096];
+static LONG g_failFrame[kMaxModels];
+static uint8_t g_mstate[kMaxModels];   // 0 unknown (game entities + probing), 1 instancing OK (candidates suppressed), 2 gave up
+static int g_mtries[kMaxModels];
 static int g_tableChecked = 0;   // 0 unknown, 1 ok, -1 mismatch
 static volatile LONG g_itemSeen[256], g_itemSupp[256];   // per procedural.dat item: candidates seen / suppressed (DumpProcedural)
 static void MaybeDumpProcedural();
@@ -378,11 +380,11 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
     if (g_tableChecked == 1 && g_itemsValid && idx >= 0 && idx < (int)g_items.size() && g_items[idx].inst) {
         const uint8_t* it = (const uint8_t*)item;
         int model = *(const int*)(it + 4);
-        if (model >= 0 && model < 4096) { g_vegSeen[model] = true; g_isProp[model] = g_items[idx].veg ? 0 : 1; if (!g_mname[model][0]) strncpy(g_mname[model], g_items[idx].name, 47); }
-        if (model >= 0 && model < 4096 && g_mstate[model] != 1) { std::lock_guard<std::mutex> l(g_instMx); g_seenModels.insert(model); }
-        static LONG s_pass[4096];
+        if (model >= 0 && model < kMaxModels) { g_vegSeen[model] = true; g_isProp[model] = g_items[idx].veg ? 0 : 1; if (!g_mname[model][0]) strncpy(g_mname[model], g_items[idx].name, 47); }
+        if (model >= 0 && model < kMaxModels && g_mstate[model] != 1) { std::lock_guard<std::mutex> l(g_instMx); g_seenModels.insert(model); }
+        static LONG s_pass[kMaxModels];
         if (cfg.grassMaterialFix && g_mode != 1 && SpotCovered((uintptr_t)tri, pos)) { if (idx < 256) InterlockedIncrement(&g_itemSupp[idx]); return; }      // under a road: neither an instance nor a game entity
-        bool doSupp = false; if (g_mode == 0 && model >= 0 && model < 4096 && g_mstate[model] != 2 && ModelResident(model)) { LONG pc = InterlockedIncrement(&s_pass[model]); doSupp = (pc & 31) != 0; /* 1 in 32 stays a real game entity: keeps the model referenced/streamed in */ }
+        bool doSupp = false; if (g_mode == 0 && model >= 0 && model < kMaxModels && g_mstate[model] != 2 && ModelResident(model)) { LONG pc = InterlockedIncrement(&s_pass[model]); doSupp = (pc & 31) != 0; /* 1 in 32 stays a real game entity: keeps the model referenced/streamed in */ }
         if (doSupp) {
             if (idx < 256) InterlockedIncrement(&g_itemSupp[idx]);
             float rotMin = *(float*)(it + 0x14), rotMax = *(float*)(it + 0x18);
@@ -768,7 +770,7 @@ static HRESULT STDMETHODCALLTYPE hDIP(IDirect3DDevice9* d, D3DPRIMITIVETYPE pt, 
         d->SetStreamSource(1, nullptr, 0, 0);
         d->SetVertexShader(vs); d->SetVertexDeclaration(decl);
         g_batch.draws++; g_dipOurs++; g_instDrawn += g_batch.count;
-        if (g_batch.model >= 0 && g_batch.model < 4096 && g_isProp[g_batch.model]) { g_dipProp++; g_instProp += g_batch.count; }
+        if (g_batch.model >= 0 && g_batch.model < kMaxModels && g_isProp[g_batch.model]) { g_dipProp++; g_instProp += g_batch.count; }
     }
     if (vs) vs->Release(); if (decl) decl->Release();
     return hr;
@@ -813,7 +815,7 @@ static bool EnsureDevice()
 
 // ---------------------------------------------------------------- frame packets
 struct Group { int model; uint32_t first; uint32_t count; };
-static int g_preCnt[4096]; static float g_fSum[4096];
+static int g_preCnt[kMaxModels]; static float g_fSum[kMaxModels];
 struct Packet { float samplePos[3] = {0,0,0}; std::vector<Group> groups; std::vector<float> data; };       // data: 16 floats / instance
 static Packet g_packets[4];
 static volatile int g_goodDirPub = -1;
@@ -838,7 +840,7 @@ static void BuildPacket(Packet& pk)
     // current aspect ratio) with 15% spare for the one-frame lag; plants within CullMargin of the cone are kept
     const bool cull = cfg.frustumCull != 0;
     const float tv = 0.70f, th = tv * g_aspect, tanC = sqrtf(th * th + tv * tv) * 1.15f, cullMargin = 2.5f;
-    static std::vector<BItem> bucket[4096];
+    static std::vector<BItem> bucket[kMaxModels];
     static std::vector<int> used;
     used.clear();
     std::lock_guard<std::mutex> l(g_instMx);
@@ -853,11 +855,11 @@ static void BuildPacket(Packet& pk)
             float c[3], ext2 = 0.f; for (int k = 0; k < 3; k++) { c[k] = 0.5f * (td0.bmin[k] + td0.bmax[k]); float e = td0.bmax[k] - td0.bmin[k]; ext2 += e * e; }
             const float rad = 0.5f * sqrtf(ext2);
             float dx = c[0] - cam[0], dy = c[1] - cam[1], d2 = dx * dx + dy * dy;
-            if (d2 > (R + rad) * (R + rad)) { if (cfg.debug) for (const Inst& in : td0.v) if (in.model < 4096) g_preCnt[in.model]++; ++it; continue; }
+            if (d2 > (R + rad) * (R + rad)) { if (cfg.debug) for (const Inst& in : td0.v) if (in.model < kMaxModels) g_preCnt[in.model]++; ++it; continue; }
             if (cull) {
                 float dz = c[2] - cam[2], z = dx * fwd[0] + dy * fwd[1] + dz * fwd[2];
                 float lim = z * tanC + cullMargin + rad * (1.f + tanC);
-                if (lim <= 0.f || d2 + dz * dz - z * z > lim * lim) { if (cfg.debug) for (const Inst& in : td0.v) if (in.model < 4096) g_preCnt[in.model]++; ++it; continue; }
+                if (lim <= 0.f || d2 + dz * dz - z * z > lim * lim) { if (cfg.debug) for (const Inst& in : td0.v) if (in.model < kMaxModels) g_preCnt[in.model]++; ++it; continue; }
             }
         }
         // boundary edges of this triangle (edges not shared with another grass triangle)
@@ -891,7 +893,7 @@ static void BuildPacket(Packet& pk)
             }
         }
         for (const Inst& in : td.v) {
-            if (cfg.debug && in.model < 4096) g_preCnt[in.model]++;
+            if (cfg.debug && in.model < kMaxModels) g_preCnt[in.model]++;
             if (in.es < 0.f || in.cov) continue;
             float dx = in.pos[0] - cam[0], dy = in.pos[1] - cam[1];
             float d2 = dx * dx + dy * dy;
@@ -998,7 +1000,7 @@ static bool DrawableDrawable(int model)
 }
 static int SampleAttempt(int model, int dirChoice, int bucket, float dist = 4.0f)
 {
-    if (model < 0 || model >= 4096) return 0;
+    if (model < 0 || model >= kMaxModels) return 0;
     if (!DrawableDrawable(model)) return -2;
     SampleDc*& sd = g_samples[model];
     if (!sd) sd = new SampleDc();
@@ -1042,11 +1044,11 @@ static bool UploadInstances(const float* data, UINT count)
     return true;
 }
 
-static uint8_t g_bucketMask[4096];      // buckets in which a model has drawn
-static uint8_t g_emptyMask[4096];       // buckets tried that drew nothing (re-checked every 64 frames)
+static uint8_t g_bucketMask[kMaxModels];      // buckets in which a model has drawn
+static uint8_t g_emptyMask[kMaxModels];       // buckets tried that drew nothing (re-checked every 64 frames)
 // Note: models with meshes in two buckets (e.g. leaves cutout + flower opaque) must draw in BOTH every frame. The old
 // scheme cleared the masks every 600 frames and then throttled the second bucket, so one part of such plants blinked.
-static int g_frameDraws[4096]; static volatile LONG g_totalDraws[4096]; static volatile LONG g_lastDraws = 0, g_lastDrawFrames = 0;
+static int g_frameDraws[kMaxModels]; static volatile LONG g_totalDraws[kMaxModels]; static volatile LONG g_lastDraws = 0, g_lastDrawFrames = 0;
 static void RunGroups(Packet* pk, int bucket)
 {
     if (!EnsureDevice()) return;
@@ -1054,13 +1056,13 @@ static void RunGroups(Packet* pk, int bucket)
     // 1) models already confirmed: draw all their instances
     for (size_t gi = 0; gi < pk->groups.size(); gi++) {
         const Group& g = pk->groups[gi];
-        if (g_mstate[g.model & 4095] != 1) continue;
-        const uint8_t bit = (uint8_t)(1u << bucket); const bool lite = (g_emptyMask[g.model & 4095] & bit) && !(g_bucketMask[g.model & 4095] & bit);      // bucket known to hold no mesh of this model: cheap re-check only
+        if (g_mstate[g.model & (kMaxModels - 1)] != 1) continue;
+        const uint8_t bit = (uint8_t)(1u << bucket); const bool lite = (g_emptyMask[g.model & (kMaxModels - 1)] & bit) && !(g_bucketMask[g.model & (kMaxModels - 1)] & bit);      // bucket known to hold no mesh of this model: cheap re-check only
         if (lite && g_goodDir >= 0) {      // only every 64th frame: uploading and drawing for a bucket the model has no meshes in is wasted work
             if (((g_renderFrame + g.model) & 63) != 0) continue;
             if (!UploadInstances(&pk->data[(size_t)g.first * 16], g.count)) { g_dbgUploadFail++; return; }
             int dr = SampleAttempt(g.model, g_goodDir, bucket, g_goodDist);
-            if (dr > 0) { g_frameDraws[g.model & 4095] += dr; g_bucketMask[g.model & 4095] |= bit; g_emptyMask[g.model & 4095] &= (uint8_t)~bit; }
+            if (dr > 0) { g_frameDraws[g.model & (kMaxModels - 1)] += dr; g_bucketMask[g.model & (kMaxModels - 1)] |= bit; g_emptyMask[g.model & (kMaxModels - 1)] &= (uint8_t)~bit; }
             continue;
         }
         if (!UploadInstances(&pk->data[(size_t)g.first * 16], g.count)) { g_dbgUploadFail++; return; }
@@ -1071,9 +1073,9 @@ static void RunGroups(Packet* pk, int bucket)
             for (int k = 0; k < 5 && draws <= 0; k++) { float d = k == 0 ? gd : dists[k - 1 < 0 ? 0 : k - 1]; if (k > 0 && d == gd) continue; draws = SampleAttempt(g.model, order[0], bucket, d); if (draws > 0) g_goodDist = d; (void)first; }
         }
         for (int a = 0; a < n && draws <= 0; a++) { draws = SampleAttempt(g.model, order[a], bucket); if (draws > 0 && g_goodDir != order[a]) { g_goodDir = order[a]; g_goodDirPub = g_goodDir; Log("sample direction re-calibrated to %d", g_goodDir); } }
-        if (draws > 0) { g_frameDraws[g.model & 4095] += draws; g_bucketMask[g.model & 4095] |= bit; g_emptyMask[g.model & 4095] &= (uint8_t)~bit; }
-        else if (draws == 0 && !(g_bucketMask[g.model & 4095] & bit)) g_emptyMask[g.model & 4095] |= bit;
-        else if (draws < 0) { g_mstate[g.model & 4095] = 2; g_failFrame[g.model & 4095] = (LONG)g_renderFrame; Log("model %d (%s): a mesh cannot be instanced -> back to game entities", g.model, g_mname[g.model & 4095]); continue; }
+        if (draws > 0) { g_frameDraws[g.model & (kMaxModels - 1)] += draws; g_bucketMask[g.model & (kMaxModels - 1)] |= bit; g_emptyMask[g.model & (kMaxModels - 1)] &= (uint8_t)~bit; }
+        else if (draws == 0 && !(g_bucketMask[g.model & (kMaxModels - 1)] & bit)) g_emptyMask[g.model & (kMaxModels - 1)] |= bit;
+        else if (draws < 0) { g_mstate[g.model & (kMaxModels - 1)] = 2; g_failFrame[g.model & (kMaxModels - 1)] = (LONG)g_renderFrame; Log("model %d (%s): a mesh cannot be instanced -> back to game entities", g.model, g_mname[g.model & (kMaxModels - 1)]); continue; }
         if (logged < 30 && draws > 0) { logged++; Log("run: bucket=%d model=%d count=%u draws=%d goodDir=%d", bucket, g.model, g.count, draws, g_goodDir); }
     }
     // 2) probe models still in the unknown state (a few per frame)
@@ -1085,11 +1087,11 @@ static void RunGroups(Packet* pk, int bucket)
             int m = unknown[(rr++) % unknown.size()];
             int dir = g_goodDir >= 0 ? g_goodDir : (g_mtries[m] % 6);
             int draws = SampleAttempt(m, dir, bucket);
-            if (draws == -2) { static uint8_t noList[4096]; g_mstate[m] = 2; g_failFrame[m] = (LONG)g_renderFrame - 1740;      // the list appears once the model has streamed in: try again after ~60 frames (cheap, nothing is drawn)
+            if (draws == -2) { static uint8_t noList[kMaxModels]; g_mstate[m] = 2; g_failFrame[m] = (LONG)g_renderFrame - 1740;      // the list appears once the model has streamed in: try again after ~60 frames (cheap, nothing is drawn)
                  if (noList[m] < 255) noList[m]++; if (noList[m] <= 3) Log("model %d (%s): drawable has no mesh list -> staying on game entities", m, g_mname[m]); continue; }
             if (g_batch.failedDips && draws > 0) draws = 0;      // a model is only confirmed when ALL its meshes instance cleanly
             if (draws > 0) { g_mstate[m] = 1; g_mtries[m] = 0; if (g_goodDir < 0) { g_goodDir = dir; g_goodDirPub = dir; } Log("model %d (%s): probe OK (bucket %d, dir %d) -> instancing enabled", m, g_mname[m], bucket, dir); }
-            else if (++g_mtries[m] > 6000) { static uint8_t failed[4096]; if (ModelResident(m) && failed[m] < 255) failed[m]++; g_mstate[m] = 2; g_failFrame[m] = failed[m] >= 3 ? 0x7fffffff : (LONG)g_renderFrame;      // a loaded model that never draws in 3 full rounds stays on game entities for good
+            else if (++g_mtries[m] > 6000) { static uint8_t failed[kMaxModels]; if (ModelResident(m) && failed[m] < 255) failed[m]++; g_mstate[m] = 2; g_failFrame[m] = failed[m] >= 3 ? 0x7fffffff : (LONG)g_renderFrame;      // a loaded model that never draws in 3 full rounds stays on game entities for good
                 Log("model %d (%s): probe failed (draws=%d, tries=%d, resident=%d) -> staying on game entities%s", m, g_mname[m], draws, g_mtries[m], (int)ModelResident(m), failed[m] >= 3 ? " for good" : ""); }
         }
     }
@@ -1152,7 +1154,7 @@ static void __fastcall hEntDraw(void* dc)
     const uint8_t* b = (const uint8_t*)dc;
     {   // b33 of fully visible real vegetation commands (b32 is the entity's fade alpha and is never copied)
         unsigned model = *(uint16_t*)(b + 0x30);
-        if (model < 4096 && g_vegSeen[model] && b[0x32] == 255) {
+        if (model < kMaxModels && g_vegSeen[model] && b[0x32] == 255) {
             static uint8_t ring[64]; static unsigned rn = 0;
             ring[rn++ & 63] = b[0x33];
             if (rn >= 64 && (rn & 63) == 0) {
@@ -1197,20 +1199,20 @@ static void __fastcall CbDraw(CbDc* dc, void*)
         // evaluate the previous frame: confirmed models that never drew are counted as failures
         if (g_curPacket && (g_ranMask != 0)) {
             for (const Group& g : g_curPacket->groups) {
-                int m = g.model & 4095;
+                int m = g.model & (kMaxModels - 1);
                 if (g_mstate[m] == 1) { if (g_frameDraws[m] > 0) g_mtries[m] = 0; else if (++g_mtries[m] > 600) { g_mstate[m] = 0; g_mtries[m] = 0; Log("model %d: lost (no draws for 600 frames) -> back to probing", m); } }
             }
         }
         if (cfg.debug && g_curPacket) {      // frames that had instanced plants to draw but drew nothing
             bool have = false; long total = 0;
-            for (const Group& g : g_curPacket->groups) if (g_mstate[g.model & 4095] == 1 && g.count > 0) { have = true; total += g_frameDraws[g.model & 4095]; }
+            for (const Group& g : g_curPacket->groups) if (g_mstate[g.model & (kMaxModels - 1)] == 1 && g.count > 0) { have = true; total += g_frameDraws[g.model & (kMaxModels - 1)]; }
             static DWORD lastMiss = 0; static int missCount = 0; DWORD now = GetTickCount();
             if (have && total == 0) { missCount++; if (now - lastMiss > 700 && missCount < 400) { lastMiss = now; const float* c = (const float*)A(G.CamPos); const float* r = (const float*)A(G.CamRows());
                 Log("[no-draw frame] attempts=%ld anyDip=%ld failed=%ld uploadFail=%ld groups=%zu inst=%zu ranMask=%02x cam=%.1f,%.1f,%.1f r0=%.2f,%.2f,%.2f r1=%.2f,%.2f,%.2f r2=%.2f,%.2f,%.2f missFrames=%d", g_dbgAttempts, g_dbgAnyDip, g_dbgFailed, g_dbgUploadFail, g_curPacket->groups.size(), g_curPacket->data.size() / 16, g_ranMask, c[0], c[1], c[2], r[0], r[1], r[2], r[4], r[5], r[6], r[8], r[9], r[10], missCount); } }
         }
-        if (cfg.debug) { g_dbgAttempts = g_dbgAnyDip = g_dbgFailed = g_dbgUploadFail = 0; long t = 0; for (int i = 0; i < 4096; i++) t += g_frameDraws[i]; g_lastDraws = t; if (t > 0) g_lastDrawFrames++; }
+        if (cfg.debug) { g_dbgAttempts = g_dbgAnyDip = g_dbgFailed = g_dbgUploadFail = 0; long t = 0; for (int i = 0; i < kMaxModels; i++) t += g_frameDraws[i]; g_lastDraws = t; if (t > 0) g_lastDrawFrames++; }
         if (cfg.profile && EnsureDevice()) PerfFrame();
-        for (int i = 0; i < 4096; i++) if (g_frameDraws[i] > 0) g_totalDraws[i] += g_frameDraws[i];
+        for (int i = 0; i < kMaxModels; i++) if (g_frameDraws[i] > 0) g_totalDraws[i] += g_frameDraws[i];
         memset(g_frameDraws, 0, sizeof g_frameDraws);
         g_ranMask = 0; g_curPacket = dc->pk; g_renderFrame++;
     }
@@ -1298,7 +1300,7 @@ static void __fastcall hGBuild(void* self)
     }
     {   // models that failed their instancing probe are retried every ~30 s of rendering
         static DWORD lastRetry = 0; DWORD now = GetTickCount();
-        if (now - lastRetry > 500) { lastRetry = now; for (int m = 0; m < 4096; m++) if (g_mstate[m] == 2 && (LONG)g_renderFrame - g_failFrame[m] > 1800) { g_mstate[m] = 0; g_mtries[m] = 0; } }
+        if (now - lastRetry > 500) { lastRetry = now; for (int m = 0; m < kMaxModels; m++) if (g_mstate[m] == 2 && (LONG)g_renderFrame - g_failFrame[m] > 1800) { g_mstate[m] = 0; g_mtries[m] = 0; } }
     }
     AppendMarker(&pk);
 }
@@ -1358,7 +1360,7 @@ static void WriteProceduralDump()
         bool isVeg = it && it->veg; bool isInst = it && it->inst; if (isVeg) veg++; else if (isInst) prop++; else other++;
         std::string tg = it ? it->tag : (tagName.count(tagNum) ? tagName[tagNum] : "?");
         auto& pt = perTag[tg]; if (isInst) pt.first++; else pt.second++;
-        bool inRange = model >= 0 && model < 4096;
+        bool inRange = model >= 0 && model < kMaxModels;
         fprintf(f, "%3u %3d %-34s %5d %-26s %-5s sp=%.2f inv=%.4f d2=%.0f al=%u grid=%u seed=%u fl=%u rot[%.2f,%.2f] scl[%.2f,%.2f] sz[%.2f,%.2f] zo[%.2f,%.2f] res=%d st=%c seen=%ld supp=%ld draws=%ld\n",
             i, tagNum, tg.c_str(), model, it ? it->name : "?", isVeg ? "VEG" : isInst ? "PROP" : "OTHER", fl[2], fl[3], fl[4], r[0x34], r[0x35], r[0x36], r[0x37],
             fl[5], fl[6], fl[7], fl[8], fl[9], fl[10], fl[11], fl[12], inRange && ModelResident(model) ? 1 : 0,
