@@ -278,11 +278,13 @@ static void ParseProcedural(const char* path)
     g_itemsValid = true;
 }
 
+static constexpr intptr_t kItemStride = 0x44;      // bytes per procedural.dat row in the game's item table
+static inline uint8_t* ItemRow(size_t i) { return (uint8_t*)A(G.ItemTable) + i * kItemStride; }
 static inline int ItemIndex(const void* item)
 {
     intptr_t d = (intptr_t)item - (intptr_t)A(G.ItemTable);
-    if (d < 0 || d % 0x44) return -1;
-    return (int)(d / 0x44);
+    if (d < 0 || d % kItemStride) return -1;
+    return (int)(d / kItemStride);
 }
 
 // ---------------------------------------------------------------- instance store
@@ -367,15 +369,15 @@ static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nr
     if (g_tableChecked == 0) {
         uint32_t n = *(uint32_t*)A(G.ItemCount);
         if (n) { g_tableChecked = (n == g_items.size()) ? 1 : -1;
-            if (g_tableChecked == 1) { std::string lst; for (size_t i = 0; i < g_items.size(); i++) { int tn = (int)*(uint32_t*)((uint8_t*)A(G.ItemTable) + i * 0x44); if (!g_tagNum.count(g_items[i].tag)) { g_tagNum[g_items[i].tag] = tn; lst += " " + std::to_string(tn) + "=" + g_items[i].tag; } } Log("tag numbers:%s", lst.c_str()); }
+            if (g_tableChecked == 1) { std::string lst; for (size_t i = 0; i < g_items.size(); i++) { int tn = (int)*(uint32_t*)ItemRow(i); if (!g_tagNum.count(g_items[i].tag)) { g_tagNum[g_items[i].tag] = tn; lst += " " + std::to_string(tn) + "=" + g_items[i].tag; } } Log("tag numbers:%s", lst.c_str()); }
             Log("item table check: game=%u file=%zu -> %s", n, g_items.size(), g_tableChecked == 1 ? "OK" : "MISMATCH, instancing disabled");
             if (g_tableChecked == 1 && cfg.instanceProps) {      // litter, rocks and other props use the same path; items that float on water stay game entities
-                int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (!g_items[i].veg && *((uint8_t*)A(G.ItemTable) + i * 0x44 + 0x37) == 0) { g_items[i].inst = true; cnt++; }
+                int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (!g_items[i].veg && ItemRow(i)[0x37] == 0) { g_items[i].inst = true; cnt++; }
                 Log("InstanceProps=1: %d litter/prop items will be instanced too", cnt); }
-            if (g_tableChecked == 1 && cfg.densityMul != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* d = (float*)((uint8_t*)A(G.ItemTable) + i * 0x44 + 0xC); *d *= cfg.densityMul; cnt++; } Log("density x%.2f applied to %d vegetation items", cfg.densityMul, cnt); }
+            if (g_tableChecked == 1 && cfg.densityMul != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* d = (float*)(ItemRow(i) + 0xC); *d *= cfg.densityMul; cnt++; } Log("density x%.2f applied to %d vegetation items", cfg.densityMul, cnt); }
             // plant size: scale the item table itself (min/max of width and height), so instanced plants and the few plants
             // that stay ordinary game objects grow or shrink together
-            if (g_tableChecked == 1 && cfg.plantScale != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* f = (float*)((uint8_t*)A(G.ItemTable) + i * 0x44 + 0x1C); for (int k = 0; k < 4; k++) f[k] *= cfg.plantScale; cnt++; } Log("plant scale x%.2f applied to %d vegetation items", cfg.plantScale, cnt); } }
+            if (g_tableChecked == 1 && cfg.plantScale != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* f = (float*)(ItemRow(i) + 0x1C); for (int k = 0; k < 4; k++) f[k] *= cfg.plantScale; cnt++; } Log("plant scale x%.2f applied to %d vegetation items", cfg.plantScale, cnt); } }
     }
     if (g_tableChecked == 1 && g_itemsValid && idx >= 0 && idx < (int)g_items.size() && g_items[idx].inst) {
         const uint8_t* it = (const uint8_t*)item;
@@ -439,17 +441,32 @@ static thread_local bool t_injecting = false;                             // the
 static thread_local uintptr_t t_rec = 0; static thread_local uint32_t t_slot = 0;      // ... for this scan record and slot
 static std::unordered_set<uintptr_t> g_releaseQ;      // mod-tagged triangles with game objects near a surface that just came: check, maybe regenerate
 static const float kCell = 4.f;
+// The plant manager keeps its triangles in one array; a pointer is a triangle that is still spawned when it lies inside the array and
+// bit 2 of its state byte is set (the game clears it when the slot is released).
+struct TriArray {
+    uintptr_t base, end;
+    TriArray() : base(*(uint32_t*)(A(G.PlantMgr) + 0xF30)), end(base + (uintptr_t)(*(uint32_t*)(A(G.PlantMgr) + 0x18)) * 0x60) {}
+    bool Spawned(uintptr_t t) const { return t >= base && t < end && (((const uint8_t*)t)[0x55] & 4); }
+};
 static inline uint64_t CellKey(int x, int y) { return ((uint64_t)(uint32_t)x << 32) | (uint32_t)y; }
 static volatile float g_coverRange = 120.f;      // covers are kept within this distance of the camera (plant radius + margin)
+// cell index: 4 m cell -> ids of the triangles / polygons touching it
+template <class Cells, class Id> static void CellsInsert(Cells& cells, int x0, int y0, int x1, int y1, Id id)
+{
+    for (int x = x0; x <= x1; x++) for (int y = y0; y <= y1; y++) cells[CellKey(x, y)].push_back(id);
+}
+template <class Cells, class Id> static void CellsErase(Cells& cells, int x0, int y0, int x1, int y1, Id id)
+{
+    for (int x = x0; x <= x1; x++) for (int y = y0; y <= y1; y++) {
+        auto c = cells.find(CellKey(x, y)); if (c == cells.end()) continue;
+        auto& v = c->second; for (size_t i = 0; i < v.size(); i++) if (v[i] == id) { v[i] = v.back(); v.pop_back(); break; }
+        if (v.empty()) cells.erase(c);
+    }
+}
 static void GeomRemove(uintptr_t tri)      // caller holds g_instMx
 {
     auto it = g_geom.find(tri); if (it == g_geom.end()) return;
-    const TriGeom& g = it->second;
-    for (int x = g.x0; x <= g.x1; x++) for (int y = g.y0; y <= g.y1; y++) {
-        auto c = g_geomCell.find(CellKey(x, y)); if (c == g_geomCell.end()) continue;
-        auto& v = c->second; for (size_t i = 0; i < v.size(); i++) if (v[i] == tri) { v[i] = v.back(); v.pop_back(); break; }
-        if (v.empty()) g_geomCell.erase(c);
-    }
+    CellsErase(g_geomCell, it->second.x0, it->second.y0, it->second.x1, it->second.y1, tri);
     g_geom.erase(it);
 }
 static void GeomMarkDirty(int x0, int y0, int x1, int y1, uintptr_t self)      // a surface came or went: plants of mod-tagged triangles around it are checked again
@@ -477,7 +494,7 @@ static void GeomAdd(uintptr_t tri, const float* t4, bool inj, uint32_t word, uin
     float mny = std::min(g.v[1], std::min(g.v[4], g.v[7])), mxy = std::max(g.v[1], std::max(g.v[4], g.v[7]));
     g.x0 = (int)floorf(mnx / kCell); g.x1 = (int)floorf(mxx / kCell); g.y0 = (int)floorf(mny / kCell); g.y1 = (int)floorf(mxy / kCell);
     if (g.x1 - g.x0 > 64 || g.y1 - g.y0 > 64) return;      // implausibly large: ignore
-    for (int x = g.x0; x <= g.x1; x++) for (int y = g.y0; y <= g.y1; y++) g_geomCell[CellKey(x, y)].push_back(tri);
+    CellsInsert(g_geomCell, g.x0, g.y0, g.x1, g.y1, tri);
     g_geom[tri] = g;
     GeomMarkDirty(g.x0, g.y0, g.x1, g.y1, tri);
 }
@@ -489,12 +506,7 @@ static std::unordered_map<uint64_t, std::vector<uint64_t>> g_polyCell;   // 4 m 
 static void PolyRemove(uint64_t key)      // caller holds g_instMx
 {
     auto it = g_poly.find(key); if (it == g_poly.end()) return;
-    const PolyGeom& g = it->second;
-    for (int x = g.x0; x <= g.x1; x++) for (int y = g.y0; y <= g.y1; y++) {
-        auto c = g_polyCell.find(CellKey(x, y)); if (c == g_polyCell.end()) continue;
-        auto& v = c->second; for (size_t i = 0; i < v.size(); i++) if (v[i] == key) { v[i] = v.back(); v.pop_back(); break; }
-        if (v.empty()) g_polyCell.erase(c);
-    }
+    CellsErase(g_polyCell, it->second.x0, it->second.y0, it->second.x1, it->second.y1, key);
     g_poly.erase(it);
 }
 // world-space corners of polygon `idx` of a collision bound, the way the game's triangle builder computes them
@@ -534,7 +546,7 @@ static void CapturePoly(const uint8_t* bound, uint32_t idx, float w[4][3], int n
     for (int t = 0; t < g.nt; t++) for (int k = 0; k < 3; k++) { mnx = std::min(mnx, g.v[t][k * 3]); mxx = std::max(mxx, g.v[t][k * 3]); mny = std::min(mny, g.v[t][k * 3 + 1]); mxy = std::max(mxy, g.v[t][k * 3 + 1]); }
     g.x0 = (int)floorf(mnx / kCell); g.x1 = (int)floorf(mxx / kCell); g.y0 = (int)floorf(mny / kCell); g.y1 = (int)floorf(mxy / kCell);
     if (g.x1 - g.x0 > 32 || g.y1 - g.y0 > 32) return;
-    for (int x = g.x0; x <= g.x1; x++) for (int y = g.y0; y <= g.y1; y++) g_polyCell[CellKey(x, y)].push_back(key);
+    CellsInsert(g_polyCell, g.x0, g.y0, g.x1, g.y1, key);
     g_poly[key] = g;
     GeomMarkDirty(g.x0, g.y0, g.x1, g.y1, 0);
 }
@@ -554,13 +566,13 @@ static void OfferCover(const uint8_t* bound, const uint8_t* ent, uint32_t idx)
 // counts when it is 5 cm - 3 m above. Caller holds g_instMx.
 static bool CoveredAt(uintptr_t self, const float* p)
 {
-    const uintptr_t arrBase = *(uint32_t*)(A(G.PlantMgr) + 0xF30), arrEnd = arrBase + (uintptr_t)(*(uint32_t*)(A(G.PlantMgr) + 0x18)) * 0x60;
+    const TriArray arr;
     static const float off[5][2] = { { 0, 0 }, { 0.25f, 0 }, { -0.25f, 0 }, { 0, 0.25f }, { 0, -0.25f } };
     for (int sI = 0; sI < 5; sI++) {
         const float x = p[0] + off[sI][0], y = p[1] + off[sI][1]; const uint64_t ck = CellKey((int)floorf(x / kCell), (int)floorf(y / kCell)); float z;
         auto c = g_geomCell.find(ck);
         if (c != g_geomCell.end()) for (uintptr_t u : c->second) {
-            if (u == self || u < arrBase || u >= arrEnd || !(((const uint8_t*)u)[0x55] & 4)) continue;      // only triangles still spawned
+            if (u == self || !arr.Spawned(u)) continue;      // only triangles still spawned
             auto ug = g_geom.find(u); if (ug == g_geom.end()) continue;
             const bool grass = g_grassMat[ug->second.mat]; if (grass && sI) continue;
             if (TriZAt(ug->second.v, x, y, &z) && z - p[2] > (grass ? 0.05f : -0.03f) && z - p[2] < 3.f) return true;
@@ -579,6 +591,12 @@ static bool SpotCovered(uintptr_t tri, const float* p)
     std::lock_guard<std::mutex> l(g_instMx);
     auto g = g_geom.find(tri); return g != g_geom.end() && g->second.inj && CoveredAt(tri, p);
 }
+// the game released all plant triangles (teleport, mode switch): drop everything the mod tracks about them
+static void ForgetAllTriangles()
+{
+    std::lock_guard<std::mutex> l(g_instMx);
+    g_byTri.clear(); g_edgeCnt.clear(); g_triEdges.clear(); g_geom.clear(); g_geomCell.clear(); g_poly.clear(); g_polyCell.clear(); g_releaseQ.clear();
+}
 typedef void(__fastcall* TriReleaseFn)(void* tri);
 static TriReleaseFn oTriRelease;
 static void __fastcall hTriRelease(void* tri)
@@ -588,7 +606,7 @@ static void __fastcall hTriRelease(void* tri)
 }
 typedef void(__cdecl* ResetFn)();
 static ResetFn oReset;
-static void __cdecl hReset2() { { std::lock_guard<std::mutex> l(g_instMx); g_byTri.clear(); g_edgeCnt.clear(); g_triEdges.clear(); g_geom.clear(); g_geomCell.clear(); g_poly.clear(); g_polyCell.clear(); g_releaseQ.clear(); } oReset(); }
+static void __cdecl hReset2() { ForgetAllTriangles(); oReset(); }
 
 // ---------------------------------------------------------------- D3DX (runtime-loaded) and VS patching
 struct ID3DXBufferLite : IUnknown { virtual void* STDMETHODCALLTYPE GetBufferPointer() = 0; virtual DWORD STDMETHODCALLTYPE GetBufferSize() = 0; };
@@ -845,11 +863,9 @@ static void BuildPacket(Packet& pk)
     used.clear();
     std::lock_guard<std::mutex> l(g_instMx);
     size_t total = 0;
-    const uintptr_t arrBase = *(uint32_t*)(A(G.PlantMgr) + 0xF30);
-    const uintptr_t arrEnd = arrBase + (uintptr_t)(*(uint32_t*)(A(G.PlantMgr) + 0x18)) * 0x60;
-        for (auto it = g_byTri.begin(); it != g_byTri.end();) {
-        const uint8_t* tri = (const uint8_t*)it->first;
-        if (!arrBase || it->first < arrBase || it->first >= arrEnd || !(tri[0x55] & 4)) { it = g_byTri.erase(it); continue; }      // slot no longer in "spawned" state
+    const TriArray arr;
+    for (auto it = g_byTri.begin(); it != g_byTri.end();) {
+        if (!arr.base || !arr.Spawned(it->first)) { it = g_byTri.erase(it); continue; }      // slot no longer in "spawned" state
         TriData& td0 = it->second;
         if (!td0.v.empty()) {      // whole triangle out of range / out of view: skip all its plants at once
             float c[3], ext2 = 0.f; for (int k = 0; k < 3; k++) { c[k] = 0.5f * (td0.bmin[k] + td0.bmax[k]); float e = td0.bmax[k] - td0.bmin[k]; ext2 += e * e; }
@@ -1249,16 +1265,16 @@ static void __fastcall hGBuild(void* self)
     if (cfg.grassMaterialFix && g_mode != 1) {      // regenerate queued triangles the way the game's scan releases one: release it, then free its slot
         std::vector<std::pair<uintptr_t, std::pair<uintptr_t, uint32_t>>> todo;
         { std::lock_guard<std::mutex> l(g_instMx);
-          const uintptr_t arrBase = *(uint32_t*)(A(G.PlantMgr) + 0xF30), arrEnd = arrBase + (uintptr_t)(*(uint32_t*)(A(G.PlantMgr) + 0x18)) * 0x60;
+          const TriArray arr;
           for (auto it = g_releaseQ.begin(); it != g_releaseQ.end();) {
               if (todo.size() >= 64) break;      // the rest waits for the next frame
               const uintptr_t t = *it; it = g_releaseQ.erase(it);
-              auto g = g_geom.find(t); if (g == g_geom.end() || !g->second.rec || t < arrBase || t >= arrEnd || !(((const uint8_t*)t)[0x55] & 4)) continue;
+              auto g = g_geom.find(t); if (g == g_geom.end() || !g->second.rec || !arr.Spawned(t)) continue;
               bool cov = false; const auto& e = g->second.ents; for (size_t k = 0; k + 2 < e.size() && !cov; k += 3) cov = CoveredAt(t, &e[k]);
               if (!cov) continue;      // its game objects stand in the open: keep it
               if (IsBadReadPtr((const void*)(g->second.rec + 0x50), 4)) continue;
               const uintptr_t slots = *(const uintptr_t*)(g->second.rec + 0x50); if (!slots || IsBadReadPtr((const void*)(slots + g->second.slot * 2), 2)) continue;
-              if (*(const uint16_t*)(slots + g->second.slot * 2) != (uint16_t)((t - arrBase) / 0x60 + 1)) continue;      // the slot must still own this triangle
+              if (*(const uint16_t*)(slots + g->second.slot * 2) != (uint16_t)((t - arr.base) / 0x60 + 1)) continue;      // the slot must still own this triangle
               todo.push_back({ t, { slots, g->second.slot } });
           }
         }
@@ -1268,7 +1284,7 @@ static void __fastcall hGBuild(void* self)
     if (g_modeReq != g_mode) {
         g_mode = g_modeReq;
         ((void(__cdecl*)())A(G.ResetAll))();      // release every plant triangle (as the game does on teleports): everything regenerates under the new mode
-        { std::lock_guard<std::mutex> l(g_instMx); g_byTri.clear(); g_edgeCnt.clear(); g_triEdges.clear(); g_geom.clear(); g_geomCell.clear(); g_poly.clear(); g_polyCell.clear(); g_releaseQ.clear(); }
+        ForgetAllTriangles();
         Log("[mode] %s", kModeName[g_mode]);
         HANDLE h = CreateThread(NULL, 0, BeepThread, (LPVOID)(intptr_t)(g_mode + 1), 0, NULL); if (h) CloseHandle(h);
     }
@@ -1352,7 +1368,7 @@ static void WriteProceduralDump()
     std::unordered_map<int, std::string> tagName; for (auto& kv : g_tagNum) tagName[kv.second] = kv.first;
     int veg = 0, prop = 0, other = 0; std::unordered_map<std::string, std::pair<int, int>> perTag;
     for (uint32_t i = 0; i < n && i < 256; i++) {
-        const uint8_t* r = (const uint8_t*)A(G.ItemTable) + i * 0x44; if (IsBadReadPtr(r, 0x44)) break;
+        const uint8_t* r = ItemRow(i); if (IsBadReadPtr(r, kItemStride)) break;
         bool known = i < g_items.size() && g_tableChecked == 1;
         const ItemInfo* it = known ? &g_items[i] : nullptr;
         int tagNum = *(const int*)r, model = *(const int*)(r + 4);
