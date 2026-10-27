@@ -23,7 +23,7 @@ static constexpr int kMaxModels = 4096;      // size of the game's model table: 
 static struct {
     int enabled = 1, triCapacity = 16384, maxInstances = 60000, debug = 0, grassTag = 0, profile = 0, toggleKey = 0, frustumCull = 1, cullKey = 0, grassMaterialFix = 1, dumpProcedural = 0, instanceProps = 1;
     float drawDistance = 0.f;      // 0 = use the game's plant radius
-    float densityMul = 1.f, radiusMul = 1.f, plantScale = 1.f, slopeAlign = 1.f;
+    float densityMul = 1.f, radiusMul = 1.5f, plantScale = 1.f, slopeAlign = 1.f;
     float normalTilt = 0.f; float edgeMargin = 0.5f, edgeSoft = 1.0f, fadeWidth = 12.f;
     std::string grassMaterials = "GRASS@EXT_GRASS_DRYPLANTS_SHORT,SHORT_GRASS@EXT_GRASS_DRYPLANTS_SHORT,GRASS_PATCHY@EXT_GRASS_DRYPLANTS_SHORT,GRASS_LONG@EXT_GRASS_DRYPLANTS_LONG";
 } cfg;
@@ -883,6 +883,38 @@ static int g_logFrames = 0;
 static volatile LONG g_edAll = 0;
 
 struct BItem { const Inst* in; float f; };
+static inline float Clamp01(float u) { return u < 0.f ? 0.f : (u > 1.f ? 1.f : u); }
+static inline float Smooth01(float u) { return u * u * (3.f - 2.f * u); }      // smoothstep of a value already in 0..1
+// View cone: a circular cone around the camera's forward axis that contains the whole screen (vertical FOV up to 70 deg,
+// current aspect ratio) with 15% spare for the one-frame lag; plants within `margin` of the cone are kept.
+struct ViewCone {
+    const float* fwd; float tanC, margin;
+    // true when a sphere of radius rad, at offset (dx,dy,dz) from the camera (d2 = dx*dx + dy*dy), lies outside the cone
+    bool Excludes(float dx, float dy, float dz, float d2, float rad) const
+    {
+        const float z = dx * fwd[0] + dy * fwd[1] + dz * fwd[2];
+        const float lim = z * tanC + margin + rad * (1.f + tanC);
+        return lim <= 0.f || d2 + dz * dz - z * z > lim * lim;
+    }
+};
+// How much of a plant is kept near the edge of its grass triangle: -1 = removed (inside EdgeMargin), 0.25..1 = shrunk, 1 = untouched.
+// bnd: the triangle's boundary edges as (x1, y1, x2, y2).
+static float EdgeFactor(const float* pos, const float (*bnd)[4], int nb)
+{
+    if (!nb) return 1.f;
+    float dmin2 = 1e30f;
+    for (int e = 0; e < nb; e++) {
+        float ax = bnd[e][0], ay = bnd[e][1], ex = bnd[e][2] - ax, ey = bnd[e][3] - ay;
+        float px = pos[0] - ax, py = pos[1] - ay, L = ex * ex + ey * ey;
+        float t = L > 1e-8f ? (px * ex + py * ey) / L : 0.f; t = Clamp01(t);
+        float qx = px - ex * t, qy = py - ey * t;
+        float q2 = qx * qx + qy * qy; if (q2 < dmin2) dmin2 = q2;
+    }
+    const float dm = sqrtf(dmin2);
+    if (dm < cfg.edgeMargin) return -1.f;
+    if (dm < cfg.edgeMargin + cfg.edgeSoft && cfg.edgeSoft > 0.01f) return 0.25f + 0.75f * Smooth01((dm - cfg.edgeMargin) / cfg.edgeSoft);
+    return 1.f;
+}
 static void BuildPacket(Packet& pk)
 {
     pk.groups.clear(); pk.data.clear();
@@ -895,10 +927,9 @@ static void BuildPacket(Packet& pk)
     float R2 = R * R;
     g_coverRange = R + 25.f;
     float fw = cfg.fadeWidth; if (fw > R * 0.6f) fw = R * 0.6f;
-    // view cone: a circular cone around the camera's forward axis that contains the whole screen (vertical FOV up to 70 deg,
-    // current aspect ratio) with 15% spare for the one-frame lag; plants within CullMargin of the cone are kept
     const bool cull = cfg.frustumCull != 0;
-    const float tv = 0.70f, th = tv * g_aspect, tanC = sqrtf(th * th + tv * tv) * 1.15f, cullMargin = 2.5f;
+    const float tv = 0.70f, th = tv * g_aspect;
+    const ViewCone cone = { fwd, sqrtf(th * th + tv * tv) * 1.15f, 2.5f };
     static std::vector<BItem> bucket[kMaxModels];
     static std::vector<int> used;
     used.clear();
@@ -913,11 +944,7 @@ static void BuildPacket(Packet& pk)
             const float rad = 0.5f * sqrtf(ext2);
             float dx = c[0] - cam[0], dy = c[1] - cam[1], d2 = dx * dx + dy * dy;
             if (d2 > (R + rad) * (R + rad)) { if (cfg.debug) for (const Inst& in : td0.v) if (in.model < kMaxModels) g_preCnt[in.model]++; ++it; continue; }
-            if (cull) {
-                float dz = c[2] - cam[2], z = dx * fwd[0] + dy * fwd[1] + dz * fwd[2];
-                float lim = z * tanC + cullMargin + rad * (1.f + tanC);
-                if (lim <= 0.f || d2 + dz * dz - z * z > lim * lim) { if (cfg.debug) for (const Inst& in : td0.v) if (in.model < kMaxModels) g_preCnt[in.model]++; ++it; continue; }
-            }
+            if (cull && cone.Excludes(dx, dy, c[2] - cam[2], d2, rad)) { if (cfg.debug) for (const Inst& in : td0.v) if (in.model < kMaxModels) g_preCnt[in.model]++; ++it; continue; }
         }
         // boundary edges of this triangle (edges not shared with another grass triangle)
         float bnd[3][4]; int nb = 0, sig = 0;
@@ -931,23 +958,7 @@ static void BuildPacket(Packet& pk)
         }
         if (td.sig != sig) {      // the edge situation changed (or new plants): recompute the cached edge factors of this triangle
             td.sig = sig;
-            for (Inst& in : td.v) {
-                float es = 1.f;
-                if (nb) {
-                    float dmin2 = 1e30f;
-                    for (int e = 0; e < nb; e++) {
-                        float ax = bnd[e][0], ay = bnd[e][1], ex = bnd[e][2] - ax, ey = bnd[e][3] - ay;
-                        float px = in.pos[0] - ax, py = in.pos[1] - ay, L = ex * ex + ey * ey;
-                        float t = L > 1e-8f ? (px * ex + py * ey) / L : 0.f; t = t < 0.f ? 0.f : (t > 1.f ? 1.f : t);
-                        float qx = px - ex * t, qy = py - ey * t;
-                        float q2 = qx * qx + qy * qy; if (q2 < dmin2) dmin2 = q2;
-                    }
-                    float dm = sqrtf(dmin2);
-                    if (dm < cfg.edgeMargin) es = -1.f;
-                    else { float m1 = cfg.edgeMargin + cfg.edgeSoft; if (dm < m1 && cfg.edgeSoft > 0.01f) { float u = (dm - cfg.edgeMargin) / cfg.edgeSoft; u = u * u * (3.f - 2.f * u); es = 0.25f + 0.75f * u; } }
-                }
-                in.es = es;
-            }
+            for (Inst& in : td.v) in.es = EdgeFactor(in.pos, bnd, nb);
         }
         for (const Inst& in : td.v) {
             if (cfg.debug && in.model < kMaxModels) g_preCnt[in.model]++;
@@ -955,17 +966,10 @@ static void BuildPacket(Packet& pk)
             float dx = in.pos[0] - cam[0], dy = in.pos[1] - cam[1];
             float d2 = dx * dx + dy * dy;
             if (d2 > R2) continue;
-            if (cull) {
-                float dz = in.pos[2] - cam[2];
-                float z = dx * fwd[0] + dy * fwd[1] + dz * fwd[2];
-                float lim = z * tanC + cullMargin;
-                if (lim <= 0.f) continue;
-                float perp2 = d2 + dz * dz - z * z;
-                if (perp2 > lim * lim) continue;
-            }
+            if (cull && cone.Excludes(dx, dy, in.pos[2] - cam[2], d2, 0.f)) continue;
             if (total >= (size_t)cfg.maxInstances) break;
             float f = in.es;
-            if (fw > 0.5f) { float u = (R - sqrtf(d2)) / fw; u = u < 0.f ? 0.f : (u > 1.f ? 1.f : u); f *= u * u * (3.f - 2.f * u); }
+            if (fw > 0.5f) f *= Smooth01(Clamp01((R - sqrtf(d2)) / fw));
             if (f <= 0.02f) continue;
             if (bucket[in.model].empty()) used.push_back(in.model);
             g_fSum[in.model] += f;
@@ -1106,6 +1110,12 @@ static uint8_t g_emptyMask[kMaxModels];       // buckets tried that drew nothing
 // Note: models with meshes in two buckets (e.g. leaves cutout + flower opaque) must draw in BOTH every frame. The old
 // scheme cleared the masks every 600 frames and then throttled the second bucket, so one part of such plants blinked.
 static int g_frameDraws[kMaxModels]; static volatile LONG g_totalDraws[kMaxModels]; static volatile LONG g_lastDraws = 0, g_lastDrawFrames = 0;
+// a model drew `draws` instanced meshes in `bit`'s bucket this frame
+static void NoteDraws(int model, uint8_t bit, int draws)
+{
+    const int m = model & (kMaxModels - 1);
+    g_frameDraws[m] += draws; g_bucketMask[m] |= bit; g_emptyMask[m] &= (uint8_t)~bit;
+}
 static void RunGroups(Packet* pk, int bucket)
 {
     if (!EnsureDevice()) return;
@@ -1119,7 +1129,7 @@ static void RunGroups(Packet* pk, int bucket)
             if (((g_renderFrame + g.model) & 63) != 0) continue;
             if (!UploadInstances(&pk->data[(size_t)g.first * 16], g.count)) { g_dbgUploadFail++; return; }
             int dr = SampleAttempt(g.model, g_goodDir, bucket, g_goodDist);
-            if (dr > 0) { g_frameDraws[g.model & (kMaxModels - 1)] += dr; g_bucketMask[g.model & (kMaxModels - 1)] |= bit; g_emptyMask[g.model & (kMaxModels - 1)] &= (uint8_t)~bit; }
+            if (dr > 0) NoteDraws(g.model, bit, dr);
             continue;
         }
         if (!UploadInstances(&pk->data[(size_t)g.first * 16], g.count)) { g_dbgUploadFail++; return; }
@@ -1130,7 +1140,7 @@ static void RunGroups(Packet* pk, int bucket)
             for (int k = 0; k < 5 && draws <= 0; k++) { float d = k == 0 ? gd : dists[k - 1 < 0 ? 0 : k - 1]; if (k > 0 && d == gd) continue; draws = SampleAttempt(g.model, order[0], bucket, d); if (draws > 0) g_goodDist = d; }
         }
         for (int a = 0; a < n && draws <= 0; a++) { draws = SampleAttempt(g.model, order[a], bucket); if (draws > 0 && g_goodDir != order[a]) { g_goodDir = order[a]; g_goodDirPub = g_goodDir; Log("sample direction re-calibrated to %d", g_goodDir); } }
-        if (draws > 0) { g_frameDraws[g.model & (kMaxModels - 1)] += draws; g_bucketMask[g.model & (kMaxModels - 1)] |= bit; g_emptyMask[g.model & (kMaxModels - 1)] &= (uint8_t)~bit; }
+        if (draws > 0) NoteDraws(g.model, bit, draws);
         else if (draws == 0 && !(g_bucketMask[g.model & (kMaxModels - 1)] & bit)) g_emptyMask[g.model & (kMaxModels - 1)] |= bit;
         else if (draws < 0) { g_mstate[g.model & (kMaxModels - 1)] = 2; g_failFrame[g.model & (kMaxModels - 1)] = (LONG)g_renderFrame; Log("model %d (%s): a mesh cannot be instanced -> back to game entities", g.model, g_mname[g.model & (kMaxModels - 1)]); continue; }
         if (logged < 30 && draws > 0) { logged++; Log("run: bucket=%d model=%d count=%u draws=%d goodDir=%d", bucket, g.model, g.count, draws, g_goodDir); }
@@ -1288,7 +1298,7 @@ static bool KeyPressed(int vk, bool& wasDown)
     wasDown = d;
     return hit;
 }
-static void __fastcall hGBuild(void* self)
+static void PollHotkeys()
 {
     if (cfg.toggleKey) {      // hotkey: MOD -> VANILLA -> NO-INSTANCING -> MOD (1/2/3 beeps)
         static bool down = false;
@@ -1298,6 +1308,9 @@ static void __fastcall hGBuild(void* self)
         static bool down = false;
         if (KeyPressed(cfg.cullKey, down)) { cfg.frustumCull = !cfg.frustumCull; Log("[cull] %s", cfg.frustumCull ? "on" : "off"); HANDLE h = CreateThread(NULL, 0, ToneThread, (LPVOID)(intptr_t)(cfg.frustumCull ? 1200 : 400), 0, NULL); if (h) CloseHandle(h); }
     }
+}
+static void EvictFarCovers()
+{
     if (cfg.grassMaterialFix) {      // forget cover polygons far from the camera (the polygon scan hands them over again when they come back)
         static DWORD lastEv = 0; DWORD now = GetTickCount();
         if (now - lastEv > 2000) {
@@ -1309,6 +1322,9 @@ static void __fastcall hGBuild(void* self)
             static DWORD lastLog = 0; if (cfg.debug && now - lastLog > 30000) { lastLog = now; Log("[cover] %zu cover polygons kept (range %.0f m)", g_poly.size(), (float)g_coverRange); }
         }
     }
+}
+static void RegenerateCoveredTriangles()
+{
     if (cfg.grassMaterialFix && g_mode != 1) {      // regenerate queued triangles the way the game's scan releases one: release it, then free its slot
         std::vector<std::pair<uintptr_t, std::pair<uintptr_t, uint32_t>>> todo;
         { std::lock_guard<std::mutex> l(g_instMx);
@@ -1328,6 +1344,9 @@ static void __fastcall hGBuild(void* self)
         if (!todo.empty()) DBG("[cover] regenerating %zu triangles whose game objects were under a surface", todo.size());
         for (auto& e : todo) { ((void(__fastcall*)(void*))A(G.TriRelease))((void*)e.first); *(uint16_t*)(e.second.first + e.second.second * 2) = 0; }
     }
+}
+static void ApplyModeRequest()
+{
     if (g_modeReq != g_mode) {
         g_mode = g_modeReq;
         ((void(__cdecl*)())A(G.ResetAll))();      // release every plant triangle (as the game does on teleports): everything regenerates under the new mode
@@ -1335,21 +1354,19 @@ static void __fastcall hGBuild(void* self)
         Log("[mode] %s", kModeName[g_mode]);
         HANDLE h = CreateThread(NULL, 0, BeepThread, (LPVOID)(intptr_t)(g_mode + 1), 0, NULL); if (h) CloseHandle(h);
     }
-    LONGLONG t0 = cfg.profile ? Qpc() : 0;
-    oGBuild(self);
-    LONGLONG t1 = cfg.profile ? Qpc() : 0;
-    static bool inited = false;
-    if (!inited) { inited = true; g_cbVt[0] = (void*)&CbDtor; g_cbVt[1] = (void*)&CbDraw; g_cbVt[2] = (void*)&CbSize; }
-    LONG f = InterlockedIncrement(&g_frameNo);
+}
+// RadiusMultiplier: widen the radius in which the game generates plants (and its removal radius)
+static void ApplyRadiusMultiplier()
+{
     if (cfg.radiusMul != 1.f) {
         float* mgr = (float*)A(G.PlantMgr);
         float detail = *(float*)A(G.DetailDist);
         float R = (detail * 0.5f + 20.f) * (g_mode == 1 ? 1.f : cfg.radiusMul);
         mgr[5] = R; mgr[7] = R + 40.f; mgr[8] = R * R;
     }
-    Packet& pk = g_packets[f & 3];
-    BuildPacket(pk);
-    if (cfg.profile) { LONGLONG t2 = Qpc(); InterlockedExchangeAdd64(&g_tGameList, t1 - t0); InterlockedExchangeAdd64(&g_tPacket, t2 - t1); InterlockedIncrement(&g_nUpd); }
+}
+static void LogDebugStats(const Packet& pk, LONG f)
+{
     if (cfg.debug && g_logFrames < 3 && !pk.groups.empty()) { Log("frame %ld: %zu groups, %zu instances (cand=%ld suppressed=%ld)", f, pk.groups.size(), pk.data.size() / 16, g_candCount, g_candSuppressed); g_logFrames++; }
     if (cfg.debug) {
         static DWORD last = 0; DWORD now = GetTickCount();
@@ -1361,10 +1378,32 @@ static void __fastcall hGBuild(void* self)
             { std::string gs; char t[64]; for (const Group& g : pk.groups) { sprintf(t, " %d:%d/%d f=%.2f", g.model, g.count, g_preCnt[g.model], g.count ? g_fSum[g.model] / g.count : 0.f); gs += t; } Log("[groups]%s", gs.c_str()); }
         }
     }
+}
+static void RetryFailedModels()
+{
     {   // models that failed their instancing probe are retried every ~30 s of rendering
         static DWORD lastRetry = 0; DWORD now = GetTickCount();
         if (now - lastRetry > 500) { lastRetry = now; for (int m = 0; m < kMaxModels; m++) if (g_mstate[m] == 2 && (LONG)g_renderFrame - g_failFrame[m] > 1800) { g_mstate[m] = 0; g_mtries[m] = 0; } }
     }
+}
+static void __fastcall hGBuild(void* self)
+{
+    PollHotkeys();
+    EvictFarCovers();
+    RegenerateCoveredTriangles();
+    ApplyModeRequest();
+    LONGLONG t0 = cfg.profile ? Qpc() : 0;
+    oGBuild(self);
+    LONGLONG t1 = cfg.profile ? Qpc() : 0;
+    static bool inited = false;
+    if (!inited) { inited = true; g_cbVt[0] = (void*)&CbDtor; g_cbVt[1] = (void*)&CbDraw; g_cbVt[2] = (void*)&CbSize; }
+    LONG f = InterlockedIncrement(&g_frameNo);
+    ApplyRadiusMultiplier();
+    Packet& pk = g_packets[f & 3];
+    BuildPacket(pk);
+    if (cfg.profile) { LONGLONG t2 = Qpc(); InterlockedExchangeAdd64(&g_tGameList, t1 - t0); InterlockedExchangeAdd64(&g_tPacket, t2 - t1); InterlockedIncrement(&g_nUpd); }
+    LogDebugStats(pk, f);
+    RetryFailedModels();
     AppendMarker(&pk);
 }
 
@@ -1640,6 +1679,53 @@ static LONG WINAPI VehLog(EXCEPTION_POINTERS* ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// ---------------------------------------------------------------- ProperGrass.ini
+// Every option lives in [Main]; a missing key keeps the default that cfg declares.
+struct IniFile {
+    std::string path;
+    int Int(const char* key, int def) const { return GetPrivateProfileIntA("Main", key, def, path.c_str()); }
+    float Float(const char* key, float def) const
+    {
+        char defText[32], buf[32]; snprintf(defText, sizeof defText, "%g", def);
+        GetPrivateProfileStringA("Main", key, defText, buf, sizeof buf, path.c_str()); return (float)atof(buf);
+    }
+    int KeyCode(const char* key) const      // virtual-key code: decimal or 0x hex, 0 = none
+    {
+        char buf[32]; GetPrivateProfileStringA("Main", key, "0", buf, sizeof buf, path.c_str()); return (int)strtol(buf, nullptr, 0);
+    }
+};
+static void LoadConfig(const std::string& iniPath, const std::string& modDir)
+{
+    const IniFile ini{ iniPath };
+    cfg.enabled = ini.Int("Enabled", cfg.enabled);
+    cfg.triCapacity = ini.Int("TriCapacity", cfg.triCapacity);
+    cfg.maxInstances = ini.Int("MaxInstances", cfg.maxInstances);
+    cfg.debug = ini.Int("Debug", cfg.debug);
+    cfg.drawDistance = ini.Float("DrawDistance", cfg.drawDistance);
+    cfg.densityMul = ini.Float("DensityMultiplier", cfg.densityMul);
+    cfg.plantScale = ini.Float("PlantScale", cfg.plantScale);
+    cfg.grassMaterialFix = ini.Int("GrassMaterialFix", cfg.grassMaterialFix);
+    cfg.slopeAlign = ini.Float("SlopeAlign", cfg.slopeAlign);
+    if (!(cfg.slopeAlign >= 0.f)) cfg.slopeAlign = 0.f;
+    if (cfg.slopeAlign > 1.f) cfg.slopeAlign = 1.f;
+    if (!(cfg.plantScale >= 0.25f)) cfg.plantScale = cfg.plantScale > 0.f ? 0.25f : 1.f;
+    if (cfg.plantScale > 3.f) cfg.plantScale = 3.f;
+    cfg.grassTag = ini.Int("GrassTag", cfg.grassTag);
+    cfg.edgeMargin = ini.Float("EdgeMargin", cfg.edgeMargin);
+    cfg.normalTilt = ini.Float("NormalTilt", cfg.normalTilt);
+    cfg.edgeSoft = ini.Float("EdgeSoft", cfg.edgeSoft);
+    cfg.fadeWidth = ini.Float("FadeWidth", cfg.fadeWidth);
+    char materials[512]; GetPrivateProfileStringA("Main", "GrassMaterials", cfg.grassMaterials.c_str(), materials, sizeof materials, iniPath.c_str()); cfg.grassMaterials = materials;
+    cfg.radiusMul = ini.Float("RadiusMultiplier", cfg.radiusMul);
+    cfg.dumpProcedural = ini.Int("DumpProcedural", cfg.dumpProcedural);
+    if (cfg.dumpProcedural) g_dumpPath = modDir + "\\ProperGrass.procedural.txt";
+    cfg.instanceProps = ini.Int("InstanceProps", cfg.instanceProps);
+    cfg.profile = ini.Int("Profile", cfg.profile);
+    cfg.frustumCull = ini.Int("FrustumCull", cfg.frustumCull);
+    cfg.cullKey = ini.KeyCode("CullKey");
+    cfg.toggleKey = ini.KeyCode("ToggleKey");
+}
+
 static HMODULE g_self;
 static DWORD WINAPI InitThread(LPVOID)
 {
@@ -1654,32 +1740,7 @@ static DWORD WINAPI InitThread(LPVOID)
     g_log = fopen((modDir + "\\ProperGrass.log").c_str(), "w");
     std::string ini = modDir + "\\ProperGrass.ini";
     AddVectoredExceptionHandler(1, VehLog);
-    cfg.enabled = GetPrivateProfileIntA("Main", "Enabled", 1, ini.c_str());
-    cfg.triCapacity = GetPrivateProfileIntA("Main", "TriCapacity", 16384, ini.c_str());
-    cfg.maxInstances = GetPrivateProfileIntA("Main", "MaxInstances", 60000, ini.c_str());
-    cfg.debug = GetPrivateProfileIntA("Main", "Debug", 0, ini.c_str());
-    char buf[32]; GetPrivateProfileStringA("Main", "DrawDistance", "0", buf, 32, ini.c_str()); cfg.drawDistance = (float)atof(buf);
-    GetPrivateProfileStringA("Main", "DensityMultiplier", "1.0", buf, 32, ini.c_str()); cfg.densityMul = (float)atof(buf);
-    GetPrivateProfileStringA("Main", "PlantScale", "1.0", buf, 32, ini.c_str()); cfg.plantScale = (float)atof(buf);
-    cfg.grassMaterialFix = GetPrivateProfileIntA("Main", "GrassMaterialFix", 1, ini.c_str());
-    GetPrivateProfileStringA("Main", "SlopeAlign", "1", buf, 32, ini.c_str()); cfg.slopeAlign = (float)atof(buf);
-    if (!(cfg.slopeAlign >= 0.f)) cfg.slopeAlign = 0.f; if (cfg.slopeAlign > 1.f) cfg.slopeAlign = 1.f;
-    if (!(cfg.plantScale >= 0.25f)) cfg.plantScale = cfg.plantScale > 0.f ? 0.25f : 1.f; if (cfg.plantScale > 3.f) cfg.plantScale = 3.f;
-    cfg.grassTag = GetPrivateProfileIntA("Main", "GrassTag", 0, ini.c_str());
-    GetPrivateProfileStringA("Main", "EdgeMargin", "0.5", buf, 32, ini.c_str()); cfg.edgeMargin = (float)atof(buf);
-    GetPrivateProfileStringA("Main", "NormalTilt", "0", buf, 32, ini.c_str()); cfg.normalTilt = (float)atof(buf);
-    GetPrivateProfileStringA("Main", "EdgeSoft", "1.0", buf, 32, ini.c_str()); cfg.edgeSoft = (float)atof(buf);
-    GetPrivateProfileStringA("Main", "FadeWidth", "12", buf, 32, ini.c_str()); cfg.fadeWidth = (float)atof(buf);
-    { char b[512]; GetPrivateProfileStringA("Main", "GrassMaterials", cfg.grassMaterials.c_str(), b, sizeof b, ini.c_str()); cfg.grassMaterials = b;
-    }
-    GetPrivateProfileStringA("Main", "RadiusMultiplier", "1.5", buf, 32, ini.c_str()); cfg.radiusMul = (float)atof(buf);
-    cfg.dumpProcedural = GetPrivateProfileIntA("Main", "DumpProcedural", 0, ini.c_str());
-    if (cfg.dumpProcedural) g_dumpPath = modDir + "\\ProperGrass.procedural.txt";
-    cfg.instanceProps = GetPrivateProfileIntA("Main", "InstanceProps", 1, ini.c_str());
-    cfg.profile = GetPrivateProfileIntA("Main", "Profile", 0, ini.c_str());
-    cfg.frustumCull = GetPrivateProfileIntA("Main", "FrustumCull", 1, ini.c_str());
-    GetPrivateProfileStringA("Main", "CullKey", "0", buf, 32, ini.c_str()); cfg.cullKey = (int)strtol(buf, nullptr, 0);
-    GetPrivateProfileStringA("Main", "ToggleKey", "0", buf, 32, ini.c_str()); cfg.toggleKey = (int)strtol(buf, nullptr, 0);
+    LoadConfig(ini, modDir);
     QueryPerformanceFrequency(&g_qpf);
     Log("ProperGrass " PROPERGRASS_VERSION " starting (enabled=%d tri=%d maxInst=%d density=%.2f radius=%.2f scale=%.2f slope=%.2f)", cfg.enabled, cfg.triCapacity, cfg.maxInstances, cfg.densityMul, cfg.radiusMul, cfg.plantScale, cfg.slopeAlign);
     if (!cfg.enabled) return 0;
