@@ -79,29 +79,30 @@ static const GameAddrs kCE = { "1.2.0.59 Complete Edition", false,
 // rebuilt between 1.2.0.x patches, so addresses move but the code does not). kind 0: function start = match + off,
 // 1: absolute address stored at match + off, 2: address of the byte at match + off. Patterns skip the first bytes of a
 // function on purpose, so a plugin that already hooked a function entry (FusionFix, ...) does not break the search.
-struct Sig { const char* name; int kind; const char* pat; int off; bool unique; };
+struct Sig { const char* name; uintptr_t GameAddrs::* field; int kind; const char* pat; int off; };
+#define SIG(Name, kind, pat, off) { #Name, &GameAddrs::Name, kind, pat, off }      // every pattern must match exactly one place
 static const Sig kCESigs[] = {
-    { "CandidateAdd", 0, "83 EC 20 0F B7 82 28 52 00 00 3B 82 20 52 00 00 7D 7D 8B 45 08 F3 0F 10", -8, true },
-    { "TriRelease", 0, "46 48 00 00 00 00 74 0B 56 B9 ? ? ? ? E8 ? ? ? ? 8A 46 55 A8 02", -8, true },
-    { "TriNew", 0, "18 8B 55 10 56 8B 75 0C 57 8B 7D 08 89 4C 24 0C F3 0F 10 47 04 F3 0F 10", -8, true },
-    { "TriBuild", 0, "E8 00 00 00 A1 ? ? ? ? 33 C4 89 84 24 E4 00 00 00 8B 45 08 8B 55 10", -8, true },
-    { "GBufferBuild", 0, "? ? ? 83 C4 04 8D 8E B0 00 00 00 E8 ? ? ? ? 84 C0 74 05 0F 57 C0 EB 08 F3 0F 10 05 ? ? ? ? 6A 00 6A 18 F3 0F 11 44 24 0C E8 ? ? ? ? 83 C4 08 85 C0 74 1F F3 0F 10 44 24 04 6A 00 6A 01 51 8B C8 F3 0F 11 04 24 6A 01 6A 00 6A 01", -24, true },
-    { "BoundGate", 0, "8B 45 00 FF 50 54 8B D8 85 DB 7F 07 5D 32 C0 5B C2 04 00 56 33 F6 57 85", -8, true },
-    { "Reset", 0, "? ? A1 ? ? ? ? 85 C0 74 16 83 C0 F0 50 E8 ? ? ? ? 83 C4 04 C7", -8, true },
-    { "ResetAll", 0, "85 F6 74 20 8D 64 24 00 8D 04 76 C1 E0 05 0F B7 B0 ? ? ? ? 8D 88 ?", -8, true },
-    { "EntDraw", 0, "44 53 56 8B F1 57 0F B7 46 30 8B 04 85 ? ? ? ? 85 C0 0F 84 ? ? ?", -8, true },
-    { "DcAppend", 0, "56 57 8B F9 8B 07 FF 50 08 25 0F 00 00 80 79 05 48 83 C8 F0", 0, true },
-    { "DcAlloc", 0, "74 24 14 8B F7 F7 DE 83 E6 0F B9 ? ? ? ? 8D 04 3E 50 E8 ? ? ? ?", -8, true },
-    { "DcEntityCtor", 0, "8B 4C 24 1C 8B 47 04 C7 07 ? ? ? ? 33 05 ? ? ? ? 25 FF 3F 00 00", -8, true },
-    { "DcIdCounter", 1, "33 05 ? ? ? ? 57 25 FF 3F 00 00", 2, true },
-    { "ItemCount", 1, "8B 1C C5 ? ? ? ? 56 8B F3 C1 E6 04 03 F3 C1 E6 02 89 4C 24 0C 89 5C 24 08 39 86 ? ? ? ? 75 60 55 8B 6C 24 18 57 3B 1D ? ? ? ?", 42, true },
-    { "PlantMgr", 1, "B9 ? ? ? ? E9 ? ? ? ? CC CC CC CC CC CC CC CC 56 E8 ? ? ? ?", 1, true },
-    { "ModelInfoTable", 1, "8B 34 85 ? ? ? ? 8B 46 08 85 C0", 3, true },
-    { "CamPos", 1, "89 06 A0 ? ? ? ? 88 46 04 F3 0F 10 05 ? ? ? ?", 14, true },
-    { "D3DDevicePtr", 1, "85 FF 75 16 A1 ? ? ? ? 57 8B 10", 5, true },
-    { "DetailDist", 1, "8B 54 24 08 85 D2 74 07 F3 0F 10 62 0C EB 05 F3 0F 10 66 0C F3 0F 10 5E 10 F3 0F 10 0D ? ? ? ?", 29, true },
-    { "TriCapImm", 2, "CC CC CC CC CC CC C7 41 10 00 00 A0 41 C7 41 14 00 00 34 42", 23, true },
-    { "Cave", 2, "56 57 8B 7D 08 8B F1 8B 47 44 89 74 24 1C 85 C0 0F 84 ? ? ? ? 8B 40 38 85 C0 0F 84 ? ? ? ? 8B 40 04 8B 48 0C 89 4C 24 2C 85 C9 0F 84 ? ? ? ? 0F B7 47 54 89 44 24 14 D1 E8 39 81 CC 00 00 00 0F 85 ? ? ? ? 8B 4C 24 14 8B C1 99 83 E2 07 03 D0 C1 FA 03 85 D2 74 22 81 7D 10 7A 7A 7A 7A 74 19 8B C2 0F AF 45 10 83 7D 10 07 89 44 24 18 74 13 8B 4D 10 41 0F AF CA EB 06 33 C0 89 44 24 18 89 4C 24 14 3B C1 0F 8D ? ? ? ? 8B 54 24 18 8D 49 00 8B 47 50 0F B7 04 50 66 85 C0 74 47 8D 0C 40 8B 86 30 0F 00 00 C1 E1 05 83 C0 A0 03 C1 89 44 24 24 8A 48 55 F6 C1 02 74 26 F6 C1 04 75 21 50 B9 ? ? ? ? E8 ? ? ? ? 8B 54 24 18 8B 4C 24 14 85 C0 74 0E 8B 44 24 24 80 48 55 04 EB 04 8B 4C 24 14 8B 47 50 0F B7 04 50 66 85 C0 0F 84 ? ? ? ? 8D 0C 40 8B 86 30 0F 00 00 83 C0 A0 C1 E1 05 03 C8 8B 45 0C F3 0F 10 58 04 F3 0F 10 28 0F 28 E3 F3 0F 5C 61 14 0F 28 F3 F3 0F 5C 71 24 0F 28 C3 F3 0F 5C 59 34 F3 0F 5C 41 04 F3 0F 11 64 24 24 0F 28 FD F3 0F 5C 79 20 F3 0F 11 5C 24 50 F3 0F 10 5C 24 24 F3 0F 58 D8 0F 28 D5 F3 0F 5C 51 10 0F 28 CD F3 0F 5C 09 F3 0F 59 1D ? ? ? ? 0F 28 E2 F3 0F 11 54 24 30 F3 0F 11 5C 24 54 F3 0F 5C 69 30 0F 28 DF F3 0F 58 DA 0F 28 D6 F3 0F 58 54 24 24 F3 0F 11 74 24 4C F3 0F 58 F0 F3 0F 59 1D ? ? ? ? F3 0F 59 15 ? ? ? ? F3 0F 59 35 ? ? ? ? F3 0F 11 54 24 58 F3 0F 58 E1 0F 28 D7 F3 0F 58 D1 F3 0F 59 C9 F3 0F 59 25 ? ? ? ? F3 0F 59 15 ? ? ? ? F3 0F 59 C0 F3 0F 11 74 24 5C F3 0F 10 76 20 F3 0F 58 C8 0F 2F CE 0F 82 ? ? ? ? F3 0F 10 44 24 30 F3 0F 10 4C 24 24 F3 0F 59 C0 F3 0F 59 C9 F3 0F 58 C1 0F 2F C6 0F 82 ? ? ? ? F3 0F 10 44 24 4C F3 0F 59 FF F3 0F 59 C0 F3 0F 58 F8 0F 2F FE 0F 82 ? ? ? ? F3 0F 10 44 24 50 F3 0F 59 ED F3 0F 59 C0 F3 0F 58 E8 0F 2F EE 0F 82 ? ? ? ? F3 0F 10 44 24 54 F3 0F 59 E4 F3 0F 59 C0 F3 0F 58 E0 0F 2F E6 0F 82 ? ? ? ? F3 0F 10 44 24 58 F3 0F 59 DB F3 0F 59 C0 F3 0F 58 D8 0F 2F DE 0F 82 ? ? ? ? F3 0F 10 44 24 5C F3 0F 59 D2 F3 0F 59 C0 F3 0F 58 D0 0F 2F D6 0F 82 ? ? ? ? E8 ? ? ? ? 8B 47 50 8B 54 24 18 33 C9 66 89 0C 50 E9 ? ? ? ? F6 C2 01 0F 85 ? ? ? ? 0F B7 46 04 66 85 C0 0F 84 ? ? ? ? 8D 0C 40 8B 86 30 0F 00 00 C1 E1 05 66 83 7C 01 F6 00 0F 84 ? ? ? ? 8B 44 24 18 8B 7F 48 D1 F8 89 44 24 5C 8D 34 00 8B CE 83 E1 1F BA 01 00 00 00 D3 E2 8B C6 C1 F8 05 85 14 87 8D 56 01 0F 95 44 24 20 8B CA 83 E1 1F B8 01 00 00 00 D3 E0 C1 FA 05 85 04 97 0F 95 C0 80 7C 24 20 00", 798, true },
+    SIG(CandidateAdd, 0, "83 EC 20 0F B7 82 28 52 00 00 3B 82 20 52 00 00 7D 7D 8B 45 08 F3 0F 10", -8),
+    SIG(TriRelease, 0, "46 48 00 00 00 00 74 0B 56 B9 ? ? ? ? E8 ? ? ? ? 8A 46 55 A8 02", -8),
+    SIG(TriNew, 0, "18 8B 55 10 56 8B 75 0C 57 8B 7D 08 89 4C 24 0C F3 0F 10 47 04 F3 0F 10", -8),
+    SIG(TriBuild, 0, "E8 00 00 00 A1 ? ? ? ? 33 C4 89 84 24 E4 00 00 00 8B 45 08 8B 55 10", -8),
+    SIG(GBufferBuild, 0, "? ? ? 83 C4 04 8D 8E B0 00 00 00 E8 ? ? ? ? 84 C0 74 05 0F 57 C0 EB 08 F3 0F 10 05 ? ? ? ? 6A 00 6A 18 F3 0F 11 44 24 0C E8 ? ? ? ? 83 C4 08 85 C0 74 1F F3 0F 10 44 24 04 6A 00 6A 01 51 8B C8 F3 0F 11 04 24 6A 01 6A 00 6A 01", -24),
+    SIG(BoundGate, 0, "8B 45 00 FF 50 54 8B D8 85 DB 7F 07 5D 32 C0 5B C2 04 00 56 33 F6 57 85", -8),
+    SIG(Reset, 0, "? ? A1 ? ? ? ? 85 C0 74 16 83 C0 F0 50 E8 ? ? ? ? 83 C4 04 C7", -8),
+    SIG(ResetAll, 0, "85 F6 74 20 8D 64 24 00 8D 04 76 C1 E0 05 0F B7 B0 ? ? ? ? 8D 88 ?", -8),
+    SIG(EntDraw, 0, "44 53 56 8B F1 57 0F B7 46 30 8B 04 85 ? ? ? ? 85 C0 0F 84 ? ? ?", -8),
+    SIG(DcAppend, 0, "56 57 8B F9 8B 07 FF 50 08 25 0F 00 00 80 79 05 48 83 C8 F0", 0),
+    SIG(DcAlloc, 0, "74 24 14 8B F7 F7 DE 83 E6 0F B9 ? ? ? ? 8D 04 3E 50 E8 ? ? ? ?", -8),
+    SIG(DcEntityCtor, 0, "8B 4C 24 1C 8B 47 04 C7 07 ? ? ? ? 33 05 ? ? ? ? 25 FF 3F 00 00", -8),
+    SIG(DcIdCounter, 1, "33 05 ? ? ? ? 57 25 FF 3F 00 00", 2),
+    SIG(ItemCount, 1, "8B 1C C5 ? ? ? ? 56 8B F3 C1 E6 04 03 F3 C1 E6 02 89 4C 24 0C 89 5C 24 08 39 86 ? ? ? ? 75 60 55 8B 6C 24 18 57 3B 1D ? ? ? ?", 42),
+    SIG(PlantMgr, 1, "B9 ? ? ? ? E9 ? ? ? ? CC CC CC CC CC CC CC CC 56 E8 ? ? ? ?", 1),
+    SIG(ModelInfoTable, 1, "8B 34 85 ? ? ? ? 8B 46 08 85 C0", 3),
+    SIG(CamPos, 1, "89 06 A0 ? ? ? ? 88 46 04 F3 0F 10 05 ? ? ? ?", 14),
+    SIG(D3DDevicePtr, 1, "85 FF 75 16 A1 ? ? ? ? 57 8B 10", 5),
+    SIG(DetailDist, 1, "8B 54 24 08 85 D2 74 07 F3 0F 10 62 0C EB 05 F3 0F 10 66 0C F3 0F 10 5E 10 F3 0F 10 0D ? ? ? ?", 29),
+    SIG(TriCapImm, 2, "CC CC CC CC CC CC C7 41 10 00 00 A0 41 C7 41 14 00 00 34 42", 23),
+    SIG(Cave, 2, "56 57 8B 7D 08 8B F1 8B 47 44 89 74 24 1C 85 C0 0F 84 ? ? ? ? 8B 40 38 85 C0 0F 84 ? ? ? ? 8B 40 04 8B 48 0C 89 4C 24 2C 85 C9 0F 84 ? ? ? ? 0F B7 47 54 89 44 24 14 D1 E8 39 81 CC 00 00 00 0F 85 ? ? ? ? 8B 4C 24 14 8B C1 99 83 E2 07 03 D0 C1 FA 03 85 D2 74 22 81 7D 10 7A 7A 7A 7A 74 19 8B C2 0F AF 45 10 83 7D 10 07 89 44 24 18 74 13 8B 4D 10 41 0F AF CA EB 06 33 C0 89 44 24 18 89 4C 24 14 3B C1 0F 8D ? ? ? ? 8B 54 24 18 8D 49 00 8B 47 50 0F B7 04 50 66 85 C0 74 47 8D 0C 40 8B 86 30 0F 00 00 C1 E1 05 83 C0 A0 03 C1 89 44 24 24 8A 48 55 F6 C1 02 74 26 F6 C1 04 75 21 50 B9 ? ? ? ? E8 ? ? ? ? 8B 54 24 18 8B 4C 24 14 85 C0 74 0E 8B 44 24 24 80 48 55 04 EB 04 8B 4C 24 14 8B 47 50 0F B7 04 50 66 85 C0 0F 84 ? ? ? ? 8D 0C 40 8B 86 30 0F 00 00 83 C0 A0 C1 E1 05 03 C8 8B 45 0C F3 0F 10 58 04 F3 0F 10 28 0F 28 E3 F3 0F 5C 61 14 0F 28 F3 F3 0F 5C 71 24 0F 28 C3 F3 0F 5C 59 34 F3 0F 5C 41 04 F3 0F 11 64 24 24 0F 28 FD F3 0F 5C 79 20 F3 0F 11 5C 24 50 F3 0F 10 5C 24 24 F3 0F 58 D8 0F 28 D5 F3 0F 5C 51 10 0F 28 CD F3 0F 5C 09 F3 0F 59 1D ? ? ? ? 0F 28 E2 F3 0F 11 54 24 30 F3 0F 11 5C 24 54 F3 0F 5C 69 30 0F 28 DF F3 0F 58 DA 0F 28 D6 F3 0F 58 54 24 24 F3 0F 11 74 24 4C F3 0F 58 F0 F3 0F 59 1D ? ? ? ? F3 0F 59 15 ? ? ? ? F3 0F 59 35 ? ? ? ? F3 0F 11 54 24 58 F3 0F 58 E1 0F 28 D7 F3 0F 58 D1 F3 0F 59 C9 F3 0F 59 25 ? ? ? ? F3 0F 59 15 ? ? ? ? F3 0F 59 C0 F3 0F 11 74 24 5C F3 0F 10 76 20 F3 0F 58 C8 0F 2F CE 0F 82 ? ? ? ? F3 0F 10 44 24 30 F3 0F 10 4C 24 24 F3 0F 59 C0 F3 0F 59 C9 F3 0F 58 C1 0F 2F C6 0F 82 ? ? ? ? F3 0F 10 44 24 4C F3 0F 59 FF F3 0F 59 C0 F3 0F 58 F8 0F 2F FE 0F 82 ? ? ? ? F3 0F 10 44 24 50 F3 0F 59 ED F3 0F 59 C0 F3 0F 58 E8 0F 2F EE 0F 82 ? ? ? ? F3 0F 10 44 24 54 F3 0F 59 E4 F3 0F 59 C0 F3 0F 58 E0 0F 2F E6 0F 82 ? ? ? ? F3 0F 10 44 24 58 F3 0F 59 DB F3 0F 59 C0 F3 0F 58 D8 0F 2F DE 0F 82 ? ? ? ? F3 0F 10 44 24 5C F3 0F 59 D2 F3 0F 59 C0 F3 0F 58 D0 0F 2F D6 0F 82 ? ? ? ? E8 ? ? ? ? 8B 47 50 8B 54 24 18 33 C9 66 89 0C 50 E9 ? ? ? ? F6 C2 01 0F 85 ? ? ? ? 0F B7 46 04 66 85 C0 0F 84 ? ? ? ? 8D 0C 40 8B 86 30 0F 00 00 C1 E1 05 66 83 7C 01 F6 00 0F 84 ? ? ? ? 8B 44 24 18 8B 7F 48 D1 F8 89 44 24 5C 8D 34 00 8B CE 83 E1 1F BA 01 00 00 00 D3 E2 8B C6 C1 F8 05 85 14 87 8D 56 01 0F 95 44 24 20 8B CA 83 E1 1F B8 01 00 00 00 D3 E0 C1 FA 05 85 04 97 0F 95 C0 80 7C 24 20 00", 798),
 };
 static const GameAddrs k1080 = { "1.0.8.0", true,
     0x9F91D0, 0xC16660, 0xC169F0, 0xC16CB0, 0xC17DCC, 0xCA3290, 0xC16170, 0xC173C0, 0xC16C50, 0x860170,
@@ -159,19 +160,11 @@ static bool ResolveCEPatterns(GameAddrs& g)
     for (const Sig& sg : kCESigs) {
         std::vector<uintptr_t> h = ScanModule(sg.pat);
         if (h.empty()) { Log("pattern %-14s NOT FOUND", sg.name); fails++; continue; }
-        if (sg.unique && h.size() != 1) { Log("pattern %-14s ambiguous (%zu matches)", sg.name, h.size()); fails++; continue; }
+        if (h.size() != 1) { Log("pattern %-14s ambiguous (%zu matches)", sg.name, h.size()); fails++; continue; }
         uintptr_t val = sg.kind == 1 ? *(uintptr_t*)(h[0] + sg.off) : h[0] + sg.off;
-        uintptr_t va = val - g_base + 0x400000;
-        const std::string n = sg.name;
-        if (n == "CandidateAdd") g.CandidateAdd = va; else if (n == "TriRelease") g.TriRelease = va; else if (n == "TriNew") g.TriNew = va;
-        else if (n == "TriBuild") g.TriBuild = va; else if (n == "GBufferBuild") g.GBufferBuild = va; else if (n == "BoundGate") g.BoundGate = va;
-        else if (n == "Reset") g.Reset = va; else if (n == "ResetAll") g.ResetAll = va; else if (n == "EntDraw") g.EntDraw = va;
-        else if (n == "DcAppend") g.DcAppend = va; else if (n == "DcAlloc") g.DcAlloc = va; else if (n == "DcEntityCtor") g.DcEntityCtor = va;
-        else if (n == "DcIdCounter") g.DcIdCounter = va; else if (n == "ItemCount") { g.ItemCount = va; g.ItemTable = va + 4; }
-        else if (n == "PlantMgr") g.PlantMgr = va; else if (n == "ModelInfoTable") g.ModelInfoTable = va; else if (n == "CamPos") g.CamPos = va;
-        else if (n == "D3DDevicePtr") g.D3DDevicePtr = va; else if (n == "DetailDist") g.DetailDist = va; else if (n == "TriCapImm") g.TriCapImm = va;
-        else if (n == "Cave") g.Cave = va;
+        g.*sg.field = val - g_base + 0x400000;
     }
+    g.ItemTable = g.ItemCount + 4;      // the table starts right after its element count
     return fails == 0;
 }
 // Sanity check for a build found by patterns. The patterns already identify the code (they are long and must match exactly one place),
@@ -361,54 +354,91 @@ static void __fastcall hCandAdd(void* mgr, void* edx, const float* pos, const fl
     hCandAddImpl(mgr, edx, pos, nrm, item, tri);
     InterlockedExchangeAdd64(&g_tCand, Qpc() - t0); InterlockedIncrement(&g_nCand);
 }
+static inline void Bump(volatile LONG (&counters)[256], int idx) { if (idx >= 0 && idx < 256) InterlockedIncrement(&counters[idx]); }
+template <class Fn> static int ForEachVegetationItem(Fn apply)
+{
+    int cnt = 0;
+    for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { apply(ItemRow(i)); cnt++; }
+    return cnt;
+}
+// First candidate of the session: the game has loaded procedural.dat by now. Compare its table with the file we parsed (instancing
+// only works when they agree) and apply the options that change the table itself.
+static void CheckItemTable()
+{
+    const uint32_t n = *(uint32_t*)A(G.ItemCount);
+    if (!n) return;      // not loaded yet: check again on the next candidate
+    g_tableChecked = (n == g_items.size()) ? 1 : -1;
+    if (g_tableChecked == 1) {
+        std::string lst;
+        for (size_t i = 0; i < g_items.size(); i++) {
+            int tn = (int)*(uint32_t*)ItemRow(i);
+            if (!g_tagNum.count(g_items[i].tag)) { g_tagNum[g_items[i].tag] = tn; lst += " " + std::to_string(tn) + "=" + g_items[i].tag; }
+        }
+        Log("tag numbers:%s", lst.c_str());
+    }
+    Log("item table check: game=%u file=%zu -> %s", n, g_items.size(), g_tableChecked == 1 ? "OK" : "MISMATCH, instancing disabled");
+    if (g_tableChecked != 1) return;
+    if (cfg.instanceProps) {      // litter, rocks and other props use the same path; items that float on water stay game entities
+        int cnt = 0;
+        for (size_t i = 0; i < g_items.size(); i++) if (!g_items[i].veg && ItemRow(i)[0x37] == 0) { g_items[i].inst = true; cnt++; }
+        Log("InstanceProps=1: %d litter/prop items will be instanced too", cnt);
+    }
+    if (cfg.densityMul != 1.f) {
+        int cnt = ForEachVegetationItem([](uint8_t* row) { *(float*)(row + 0xC) *= cfg.densityMul; });
+        Log("density x%.2f applied to %d vegetation items", cfg.densityMul, cnt);
+    }
+    // plant size: scale the item table itself (min/max of width and height), so instanced plants and the few plants
+    // that stay ordinary game objects grow or shrink together
+    if (cfg.plantScale != 1.f) {
+        int cnt = ForEachVegetationItem([](uint8_t* row) { float* f = (float*)(row + 0x1C); for (int k = 0; k < 4; k++) f[k] *= cfg.plantScale; });
+        Log("plant scale x%.2f applied to %d vegetation items", cfg.plantScale, cnt);
+    }
+}
+// One instance from the item's size/rotation/offset ranges. The random numbers come from the spot itself, so the same spot always
+// grows the same plant (no flicker when the game regenerates a triangle).
+static Inst MakeInstance(const uint8_t* it, int idx, int model, const float* pos, const float* nrm)
+{
+    const float rotMin = *(const float*)(it + 0x14), rotMax = *(const float*)(it + 0x18);
+    const float sclMin = *(const float*)(it + 0x1C), sclMax = *(const float*)(it + 0x20);
+    const float szMin  = *(const float*)(it + 0x24), szMax  = *(const float*)(it + 0x28);
+    const float zoMin  = *(const float*)(it + 0x2C), zoMax  = *(const float*)(it + 0x30);
+    uint32_t s = Hash32(*(const uint32_t*)&pos[0]) ^ Hash32(*(const uint32_t*)&pos[1] + 17u) ^ Hash32(*(const uint32_t*)&pos[2] + 91u) ^ (uint32_t)idx * 2654435761u;
+    Inst in;
+    float rot = rotMin + Rnd(s) * (rotMax - rotMin);
+    in.cs = cosf(rot); in.sn = sinf(rot);
+    in.sxy = sclMin + Rnd(s) * (sclMax - sclMin);
+    in.sz  = szMin + Rnd(s) * (szMax - szMin);
+    in.zoff = zoMin + Rnd(s) * (zoMax - zoMin);
+    memcpy(in.pos, pos, 12); memcpy(in.nrm, nrm, 12);
+    in.model = (uint16_t)model; in.align = it[0x34]; in.cov = 0;
+    ComputeBase(in);
+    return in;
+}
+static void StoreInstance(const void* tri, const Inst& in)
+{
+    std::lock_guard<std::mutex> l(g_instMx);
+    TriData& td = g_byTri[(uintptr_t)tri]; td.v.push_back(in); td.sig = -1; td.covDirty = true;
+    for (int k = 0; k < 3; k++) { if (in.pos[k] < td.bmin[k]) td.bmin[k] = in.pos[k]; if (in.pos[k] > td.bmax[k]) td.bmax[k] = in.pos[k]; }
+    g_seenModels.insert(in.model);
+}
 static void hCandAddImpl(void* mgr, void* edx, const float* pos, const float* nrm, const void* item, const void* tri)
 {
     InterlockedIncrement(&g_candCount);
     int idx = ItemIndex(item);
-    if (cfg.dumpProcedural) { if (idx >= 0 && idx < 256) InterlockedIncrement(&g_itemSeen[idx]); MaybeDumpProcedural(); }
-    if (g_tableChecked == 0) {
-        uint32_t n = *(uint32_t*)A(G.ItemCount);
-        if (n) { g_tableChecked = (n == g_items.size()) ? 1 : -1;
-            if (g_tableChecked == 1) { std::string lst; for (size_t i = 0; i < g_items.size(); i++) { int tn = (int)*(uint32_t*)ItemRow(i); if (!g_tagNum.count(g_items[i].tag)) { g_tagNum[g_items[i].tag] = tn; lst += " " + std::to_string(tn) + "=" + g_items[i].tag; } } Log("tag numbers:%s", lst.c_str()); }
-            Log("item table check: game=%u file=%zu -> %s", n, g_items.size(), g_tableChecked == 1 ? "OK" : "MISMATCH, instancing disabled");
-            if (g_tableChecked == 1 && cfg.instanceProps) {      // litter, rocks and other props use the same path; items that float on water stay game entities
-                int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (!g_items[i].veg && ItemRow(i)[0x37] == 0) { g_items[i].inst = true; cnt++; }
-                Log("InstanceProps=1: %d litter/prop items will be instanced too", cnt); }
-            if (g_tableChecked == 1 && cfg.densityMul != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* d = (float*)(ItemRow(i) + 0xC); *d *= cfg.densityMul; cnt++; } Log("density x%.2f applied to %d vegetation items", cfg.densityMul, cnt); }
-            // plant size: scale the item table itself (min/max of width and height), so instanced plants and the few plants
-            // that stay ordinary game objects grow or shrink together
-            if (g_tableChecked == 1 && cfg.plantScale != 1.f) { int cnt = 0; for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].veg) { float* f = (float*)(ItemRow(i) + 0x1C); for (int k = 0; k < 4; k++) f[k] *= cfg.plantScale; cnt++; } Log("plant scale x%.2f applied to %d vegetation items", cfg.plantScale, cnt); } }
-    }
+    if (cfg.dumpProcedural) { Bump(g_itemSeen, idx); MaybeDumpProcedural(); }
+    if (g_tableChecked == 0) CheckItemTable();
     if (g_tableChecked == 1 && g_itemsValid && idx >= 0 && idx < (int)g_items.size() && g_items[idx].inst) {
         const uint8_t* it = (const uint8_t*)item;
-        int model = *(const int*)(it + 4);
-        if (model >= 0 && model < kMaxModels) { g_vegSeen[model] = true; g_isProp[model] = g_items[idx].veg ? 0 : 1; if (!g_mname[model][0]) strncpy(g_mname[model], g_items[idx].name, 47); }
-        if (model >= 0 && model < kMaxModels && g_mstate[model] != 1) { std::lock_guard<std::mutex> l(g_instMx); g_seenModels.insert(model); }
+        const int model = *(const int*)(it + 4);
+        const bool modelOk = model >= 0 && model < kMaxModels;
+        if (modelOk) { g_vegSeen[model] = true; g_isProp[model] = g_items[idx].veg ? 0 : 1; if (!g_mname[model][0]) strncpy(g_mname[model], g_items[idx].name, 47); }
+        if (modelOk && g_mstate[model] != 1) { std::lock_guard<std::mutex> l(g_instMx); g_seenModels.insert(model); }
         static LONG s_pass[kMaxModels];
-        if (cfg.grassMaterialFix && g_mode != 1 && SpotCovered((uintptr_t)tri, pos)) { if (idx < 256) InterlockedIncrement(&g_itemSupp[idx]); return; }      // under a road: neither an instance nor a game entity
-        bool doSupp = false; if (g_mode == 0 && model >= 0 && model < kMaxModels && g_mstate[model] != 2 && ModelResident(model)) { LONG pc = InterlockedIncrement(&s_pass[model]); doSupp = (pc & 31) != 0; /* 1 in 32 stays a real game entity: keeps the model referenced/streamed in */ }
+        if (cfg.grassMaterialFix && g_mode != 1 && SpotCovered((uintptr_t)tri, pos)) { Bump(g_itemSupp, idx); return; }      // under a road: neither an instance nor a game entity
+        bool doSupp = false; if (g_mode == 0 && modelOk && g_mstate[model] != 2 && ModelResident(model)) { LONG pc = InterlockedIncrement(&s_pass[model]); doSupp = (pc & 31) != 0; /* 1 in 32 stays a real game entity: keeps the model referenced/streamed in */ }
         if (doSupp) {
-            if (idx < 256) InterlockedIncrement(&g_itemSupp[idx]);
-            float rotMin = *(float*)(it + 0x14), rotMax = *(float*)(it + 0x18);
-            float sclMin = *(float*)(it + 0x1C), sclMax = *(float*)(it + 0x20);
-            float szMin  = *(float*)(it + 0x24), szMax  = *(float*)(it + 0x28);
-            float zoMin  = *(float*)(it + 0x2C), zoMax  = *(float*)(it + 0x30);
-            uint32_t s = Hash32(*(uint32_t*)&pos[0]) ^ Hash32(*(uint32_t*)&pos[1] + 17u) ^ Hash32(*(uint32_t*)&pos[2] + 91u) ^ (uint32_t)idx * 2654435761u;
-            Inst in;
-            float rot = rotMin + Rnd(s) * (rotMax - rotMin);
-            in.cs = cosf(rot); in.sn = sinf(rot);
-            in.sxy = sclMin + Rnd(s) * (sclMax - sclMin);
-            in.sz  = szMin + Rnd(s) * (szMax - szMin);
-            in.zoff = zoMin + Rnd(s) * (zoMax - zoMin);
-            memcpy(in.pos, pos, 12); memcpy(in.nrm, nrm, 12);
-            in.model = (uint16_t)model; in.align = it[0x34];
-            ComputeBase(in);
-            {
-                std::lock_guard<std::mutex> l(g_instMx);
-                TriData& td = g_byTri[(uintptr_t)tri]; in.cov = 0; td.v.push_back(in); td.sig = -1; td.covDirty = true;
-                for (int k = 0; k < 3; k++) { if (pos[k] < td.bmin[k]) td.bmin[k] = pos[k]; if (pos[k] > td.bmax[k]) td.bmax[k] = pos[k]; }
-                g_seenModels.insert(model);
-            }
+            Bump(g_itemSupp, idx);
+            StoreInstance(tri, MakeInstance(it, idx, model, pos, nrm));
             InterlockedIncrement(&g_candSuppressed);
             return;               // do not create a game entity
         }
@@ -633,13 +663,15 @@ static const char* kPrologue =
     "    mad r27, c250.x, c8, c11\n    mad r27, c250.y, c9, r27\n    mad r27, c250.z, c10, r27\n"
     "    mad r27, r31.x, c8, r27\n    mad r27, r31.y, c9, r27\n    mad r27, r31.z, c10, r27\n";
 
+// the constant registers whose values the instance matrix replaces: c0..c3 and c8..c11
+static bool IsVirtualisedConst(int n) { return (n >= 0 && n <= 3) || (n >= 8 && n <= 11); }
 static bool PatchVsText(const std::string& src, std::string& out)
 {
     // reject if shader defines constants we will virtualise, or uses r24+ temps
     // constants the shader defines itself in c0..c3 / c8..c11 are renamed (c240+N), so the registers can be virtualised for the instance matrices
     bool renamed[16] = {};
     { size_t p2 = 0; while (p2 < src.size()) { size_t e2 = src.find('\n', p2); if (e2 == std::string::npos) e2 = src.size(); std::string ln = src.substr(p2, e2 - p2); p2 = e2 + 1;
-        size_t f2 = ln.find_first_not_of(" \t\r"); if (f2 == std::string::npos) continue; int n2 = -1; if (sscanf(ln.c_str() + f2, "def c%d", &n2) == 1 && ((n2 >= 0 && n2 <= 3) || (n2 >= 8 && n2 <= 11))) renamed[n2] = true; } }
+        size_t f2 = ln.find_first_not_of(" \t\r"); if (f2 == std::string::npos) continue; int n2 = -1; if (sscanf(ln.c_str() + f2, "def c%d", &n2) == 1 && IsVirtualisedConst(n2)) renamed[n2] = true; } }
     std::string res; size_t pos = 0; bool prologueDone = false; bool usesWorld = false;
     while (pos < src.size()) {
         size_t e = src.find('\n', pos); if (e == std::string::npos) e = src.size();
@@ -652,7 +684,7 @@ static bool PatchVsText(const std::string& src, std::string& out)
         if (isDef) {
             // def cN
             int n = -1;
-            if (sscanf(t.c_str(), "def c%d", &n) == 1 && ((n >= 0 && n <= 3) || (n >= 8 && n <= 11))) { size_t cpos = t.find("c" + std::to_string(n)); res += "    def c" + std::to_string(240 + n) + t.substr(cpos + 1 + std::to_string(n).size()) + "\n"; continue; }
+            if (sscanf(t.c_str(), "def c%d", &n) == 1 && IsVirtualisedConst(n)) { size_t cpos = t.find("c" + std::to_string(n)); res += "    def c" + std::to_string(240 + n) + t.substr(cpos + 1 + std::to_string(n).size()) + "\n"; continue; }
             res += line + "\n"; continue;
         }
         if (!isDcl && !prologueDone) { res += kPrologue; prologueDone = true; }
@@ -668,7 +700,7 @@ static bool PatchVsText(const std::string& src, std::string& out)
                 if (j > i + 1 && !(j < t.size() && isalnum((unsigned char)t[j]))) {
                     int n = atoi(t.c_str() + i + 1);
                     if (j < t.size() && t[j] == '[') return false;
-                    if (((n >= 0 && n <= 3) || (n >= 8 && n <= 11)) && renamed[n]) { o += "c" + std::to_string(240 + n); i = j; continue; }
+                    if (IsVirtualisedConst(n) && renamed[n]) { o += "c" + std::to_string(240 + n); i = j; continue; }
                     if (n >= 0 && n <= 3) { o += "r" + std::to_string(28 + n); i = j; usesWorld = true; continue; }
                     if (n >= 8 && n <= 11) { o += "r" + std::to_string(24 + n - 8); i = j; usesWorld = true; continue; }
                 }
@@ -752,6 +784,16 @@ typedef HRESULT(STDMETHODCALLTYPE* DIP_t)(IDirect3DDevice9*, D3DPRIMITIVETYPE, I
 typedef HRESULT(STDMETHODCALLTYPE* Reset_t)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
 
 // DrawIndexedPrimitive: while our batch is active, turn the game's single draw into a hardware-instanced one
+// FNV-1a of a shader's byte code (debug log only: tells the sample draw's shaders apart)
+template <class Shader> static uint32_t ShaderHash(Shader* sh)
+{
+    uint32_t h = 2166136261u; UINT size = 0;
+    if (sh && SUCCEEDED(sh->GetFunction(nullptr, &size)) && size) {
+        std::vector<uint8_t> code(size); sh->GetFunction(code.data(), &size);
+        for (UINT i = 0; i < size; i++) { h ^= code[i]; h *= 16777619u; }
+    }
+    return h;
+}
 static HRESULT STDMETHODCALLTYPE hDIP(IDirect3DDevice9* d, D3DPRIMITIVETYPE pt, INT bv, UINT mi, UINT nv, UINT si, UINT pc)
 {
     DIP_t orig = (DIP_t)g_vtblOrig[82];
@@ -766,12 +808,11 @@ static HRESULT STDMETHODCALLTYPE hDIP(IDirect3DDevice9* d, D3DPRIMITIVETYPE pt, 
     IDirect3DVertexShader9* pvs = vs ? GetPatchedVS(vs) : nullptr;
     IDirect3DVertexDeclaration9* pdecl = decl ? GetInstDecl(decl) : nullptr;
     if (cfg.debug) {      // which meshes/shaders does the sample draw issue, and how does that depend on the view?
-        static int nl = 0; static float lastPitch = 9; const float* rr = (const float*)A(G.CamRows());
+        static int nl = 0; const float* rr = (const float*)A(G.CamRows());
         bool steep = rr[6] < -0.5f; static bool lastSteep = false; if (steep != lastSteep) { lastSteep = steep; nl = 0; }
-        if (nl < 40) { nl++; uint32_t h = 2166136261u; UINT sz2 = 0; if (vs && SUCCEEDED(vs->GetFunction(nullptr, &sz2)) && sz2) { std::vector<uint8_t> cc(sz2); vs->GetFunction(cc.data(), &sz2); for (UINT i = 0; i < sz2; i++) { h ^= cc[i]; h *= 16777619u; } }
-            IDirect3DPixelShader9* ps = nullptr; d->GetPixelShader(&ps); uint32_t ph = 2166136261u; UINT psz = 0; if (ps && SUCCEEDED(ps->GetFunction(nullptr, &psz)) && psz) { std::vector<uint8_t> cc(psz); ps->GetFunction(cc.data(), &psz); for (UINT i = 0; i < psz; i++) { ph ^= cc[i]; ph *= 16777619u; } } if (ps) ps->Release();
+        if (nl < 40) { nl++; const uint32_t h = ShaderHash(vs);
+            IDirect3DPixelShader9* ps = nullptr; d->GetPixelShader(&ps); const uint32_t ph = ShaderHash(ps); if (ps) ps->Release();
             Log("[dip] %s model=%d bucket=%d dist=%.1f vs=%08x ps=%08x prims=%u verts=%u patched=%d", steep ? "STEEP" : "level", g_batch.model, g_batch.bucket, g_batch.dist, h, ph, pc, nv, pvs && pdecl ? 1 : 0); }
-        (void)lastPitch;
     }
     HRESULT hr;
     if (!pvs || !pdecl) {
@@ -1085,8 +1126,8 @@ static void RunGroups(Packet* pk, int bucket)
         int order[6], n = 0; if (g_goodDir >= 0) order[n++] = g_goodDir; for (int c = 0; c < 6; c++) if (c != g_goodDir) order[n++] = c;
         int draws = 0;
         {   // the sample must sit where the game does not cull it: first try other distances along the calibrated direction (steep downward views cull the usual 4 m)
-            static const float dists[5] = { 4.0f, 2.5f, 1.5f, 7.0f, 10.0f }; int first = 0; float gd = g_goodDist;
-            for (int k = 0; k < 5 && draws <= 0; k++) { float d = k == 0 ? gd : dists[k - 1 < 0 ? 0 : k - 1]; if (k > 0 && d == gd) continue; draws = SampleAttempt(g.model, order[0], bucket, d); if (draws > 0) g_goodDist = d; (void)first; }
+            static const float dists[5] = { 4.0f, 2.5f, 1.5f, 7.0f, 10.0f }; float gd = g_goodDist;
+            for (int k = 0; k < 5 && draws <= 0; k++) { float d = k == 0 ? gd : dists[k - 1 < 0 ? 0 : k - 1]; if (k > 0 && d == gd) continue; draws = SampleAttempt(g.model, order[0], bucket, d); if (draws > 0) g_goodDist = d; }
         }
         for (int a = 0; a < n && draws <= 0; a++) { draws = SampleAttempt(g.model, order[a], bucket); if (draws > 0 && g_goodDir != order[a]) { g_goodDir = order[a]; g_goodDirPub = g_goodDir; Log("sample direction re-calibrated to %d", g_goodDir); } }
         if (draws > 0) { g_frameDraws[g.model & (kMaxModels - 1)] += draws; g_bucketMask[g.model & (kMaxModels - 1)] |= bit; g_emptyMask[g.model & (kMaxModels - 1)] &= (uint8_t)~bit; }
@@ -1133,11 +1174,11 @@ static void TimedRun(Packet* pk, int B)
 // once per rendered frame (render thread): frame time, GPU readback, periodic report
 static void PerfFrame()
 {
-    static LONGLONG last = 0, winStart = 0, modeSince = 0; static std::vector<float> ft; static int dipFrames = 0; static int lastMode = -1;
+    static LONGLONG last = 0, winStart = 0; static std::vector<float> ft; static int dipFrames = 0; static int lastMode = -1;
     LONGLONG now = Qpc();
     static int lastCull = -1; if (cfg.frustumCull != lastCull) { lastCull = cfg.frustumCull; lastMode = -1; }
     if (g_mode != lastMode) {      // new mode: drop the partial window so modes never mix
-        lastMode = g_mode; modeSince = now; ft.clear(); winStart = now; dipFrames = 0; g_tRun = 0; g_dipAll = g_dipOurs = g_dipProp = 0; g_instDrawn = g_instProp = 0; g_gpuMs = 0; g_gpuFrames = 0;
+        lastMode = g_mode; ft.clear(); winStart = now; dipFrames = 0; g_tRun = 0; g_dipAll = g_dipOurs = g_dipProp = 0; g_instDrawn = g_instProp = 0; g_gpuMs = 0; g_gpuFrames = 0;
         InterlockedExchange(&g_nUpd, 0); InterlockedExchange64(&g_tGameList, 0); InterlockedExchange64(&g_tPacket, 0); InterlockedExchange64(&g_tCand, 0); InterlockedExchange(&g_nCand, 0); InterlockedExchange(&g_nEnt, 0);
     }
     if (last) ft.push_back((float)Ms(now - last));
@@ -1239,17 +1280,23 @@ static GBuild_t oGBuild;
 static DWORD WINAPI BeepThread(LPVOID p) { int n = (int)(intptr_t)p; for (int i = 0; i < n; i++) { Beep(n == 2 ? 520 : 900, 110); Sleep(70); } return 0; }
 static DWORD WINAPI ToneThread(LPVOID p) { Beep((DWORD)(intptr_t)p, 150); return 0; }
 static bool GameIsForeground() { DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid); return pid == GetCurrentProcessId(); }
+// true once per key press, only while the game window has the focus
+static bool KeyPressed(int vk, bool& wasDown)
+{
+    const bool d = (GetAsyncKeyState(vk) & 0x8000) != 0;
+    const bool hit = d && !wasDown && GameIsForeground();
+    wasDown = d;
+    return hit;
+}
 static void __fastcall hGBuild(void* self)
 {
     if (cfg.toggleKey) {      // hotkey: MOD -> VANILLA -> NO-INSTANCING -> MOD (1/2/3 beeps)
-        static bool down = false; bool d = (GetAsyncKeyState(cfg.toggleKey) & 0x8000) != 0;
-        if (d && !down && GameIsForeground()) g_modeReq = (g_mode + 1) % 3;
-        down = d;
+        static bool down = false;
+        if (KeyPressed(cfg.toggleKey, down)) g_modeReq = (g_mode + 1) % 3;
     }
     if (cfg.cullKey) {        // hotkey: view-cone culling on/off (high beep = on, low beep = off)
-        static bool down = false; bool d = (GetAsyncKeyState(cfg.cullKey) & 0x8000) != 0;
-        if (d && !down && GameIsForeground()) { cfg.frustumCull = !cfg.frustumCull; Log("[cull] %s", cfg.frustumCull ? "on" : "off"); HANDLE h = CreateThread(NULL, 0, ToneThread, (LPVOID)(intptr_t)(cfg.frustumCull ? 1200 : 400), 0, NULL); if (h) CloseHandle(h); }
-        down = d;
+        static bool down = false;
+        if (KeyPressed(cfg.cullKey, down)) { cfg.frustumCull = !cfg.frustumCull; Log("[cull] %s", cfg.frustumCull ? "on" : "off"); HANDLE h = CreateThread(NULL, 0, ToneThread, (LPVOID)(intptr_t)(cfg.frustumCull ? 1200 : 400), 0, NULL); if (h) CloseHandle(h); }
     }
     if (cfg.grassMaterialFix) {      // forget cover polygons far from the camera (the polygon scan hands them over again when they come back)
         static DWORD lastEv = 0; DWORD now = GetTickCount();
@@ -1491,8 +1538,8 @@ static void* __fastcall hBoundAttach(void* self, void* edx, void* owner)
     for (int i = 0; i < n; i++) {
         uint32_t wd; Words((void*)bnd, (uint32_t)i, &wd);       // polygon i of the bound -> its material word
         int mat = wd & 0xff, tag = (wd >> 8) & 0xff;
-        if (tag == 0 && g_grassMat[mat] && GrassTagFor(mat)) { int bit = 2 * i + 1; if ((uint32_t)(bit >> 5) < bitWords) bits[bit >> 5] |= 1u << (bit & 31); }
-        else if (tag == 0 && !g_grassMat[mat]) { int bit = 2 * i + 1; if ((uint32_t)(bit >> 5) < bitWords) bits[bit >> 5] |= 1u << (bit & 31); }      // untagged surface: the scan hands it to hTriBuild, which keeps it as a possible cover
+        // untagged grass material that gets a tag, or untagged surface that the scan hands to hTriBuild to keep as a possible cover
+        if (tag == 0 && (!g_grassMat[mat] || GrassTagFor(mat))) { int bit = 2 * i + 1; if ((uint32_t)(bit >> 5) < bitWords) bits[bit >> 5] |= 1u << (bit & 31); }
     }
     return r;
 }
