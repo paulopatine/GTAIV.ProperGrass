@@ -16,6 +16,8 @@
 #include <unordered_set>
 #include <mutex>
 #include <algorithm>
+#include <malloc.h>
+#include <new>
 
 // ---------------------------------------------------------------- config / log
 static struct {
@@ -963,7 +965,9 @@ static void AppendMarker(Packet* pk)
 }
 
 static const float kIdentity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
-struct SampleDc { alignas(16) uint8_t mem[0x40]; bool made = false; };
+// The game's entity draw command only uses 0x38 bytes, but ZMenu detours its constructor and writes a matrix up to +0x70:
+// keep a wide margin or that overflows the heap block.
+struct SampleDc { alignas(16) uint8_t mem[0x100] = {}; bool made = false; };
 static std::unordered_map<int, SampleDc*> g_samples;
 
 static Packet* g_curPacket;               // set by the marker command (render thread)
@@ -1001,14 +1005,16 @@ static int SampleAttempt(int model, int dirChoice, int bucket, float dist = 4.0f
     if (model < 0 || model >= 4096) return 0;
     if (!DrawableDrawable(model)) return -2;
     SampleDc*& sd = g_samples[model];
-    if (!sd) sd = new SampleDc();
+    // mingw's operator new only guarantees 8-byte alignment, ignoring alignas(16); the game's entity code (and plugins hooking it, e.g. ZMenu) copy matrices with movaps
+    if (!sd) sd = new (_aligned_malloc(sizeof(SampleDc), 16)) SampleDc();
     const float* camp = (const float*)A(G.CamPos);
     const float* rows = (const float*)A(G.CamRows());
     int axis = dirChoice >> 1; float sg = (dirChoice & 1) ? 1.f : -1.f;
     float p[3]; for (int k = 0; k < 3; k++) p[k] = camp[k] + sg * dist * rows[axis * 4 + k];
     for (int k = 0; k < 3; k++) g_batch.negT[k] = -p[k];
     g_batch.failed = false; g_batch.draws = 0; g_batch.anyDip = 0; g_batch.failedDips = 0; g_batch.on = true; g_batch.model = model; g_batch.bucket = bucket; g_batch.dist = dist;
-    float m[16]; memcpy(m, kIdentity, sizeof m); m[12] = p[0]; m[13] = p[1]; m[14] = p[2];
+    alignas(16) float m[16];      // 16-aligned: the matrix is read with movaps by the game and by hooks of other plugins
+    memcpy(m, kIdentity, sizeof m); m[12] = p[0]; m[13] = p[1]; m[14] = p[2];
     if (!sd->made) {
         g_ownCtor = true;
         ((DcEntityCtor_t)A(G.DcEntityCtor))(sd->mem, nullptr, model, g_ambB32, g_ambB33, 0, m, bucket, 0);
