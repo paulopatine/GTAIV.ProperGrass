@@ -1,8 +1,8 @@
 // GTA IV Proper Grass - GPU instanced procedural vegetation.
 // https://github.com/paulopatine/GTAIV.ProperGrass  (MIT License)
 // Target: GTAIV.exe 1.2.0.59 (Complete Edition). Loaded as an .asi plugin (FusionFix / Ultimate ASI Loader).
-// Build: i686-w64-mingw32-g++ -std=c++17 -O2 -shared -static -s src/ProperGrass.cpp -o GTAIV.ProperGrass.asi
-#define PROPERGRASS_VERSION "1.2.0"
+// Build: i686-w64-mingw32-g++ -std=c++17 -O2 -mstackrealign -shared -static -s src/ProperGrass.cpp -o GTAIV.ProperGrass.asi (see build.sh)
+#define PROPERGRASS_VERSION "1.2.1"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d9.h>
