@@ -1032,6 +1032,8 @@ static const float kIdentity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
 // keep a wide margin or that overflows the heap block.
 struct SampleDc { alignas(16) uint8_t mem[0x100] = {}; bool made = false; };
 static std::unordered_map<int, SampleDc*> g_samples;
+// mingw's operator new only guarantees 8-byte alignment, ignoring alignas(16); the game's entity code (and plugins hooking it, e.g. ZMenu) copy matrices with movaps
+static SampleDc* NewSampleDc() { return new (_aligned_malloc(sizeof(SampleDc), 16)) SampleDc(); }
 
 static Packet* g_curPacket;               // set by the marker command (render thread)
 static LONG g_fbRuns = 0, g_fbSkip = 0;
@@ -1068,8 +1070,7 @@ static int SampleAttempt(int model, int dirChoice, int bucket, float dist = 4.0f
     if (model < 0 || model >= kMaxModels) return 0;
     if (!DrawableDrawable(model)) return -2;
     SampleDc*& sd = g_samples[model];
-    // mingw's operator new only guarantees 8-byte alignment, ignoring alignas(16); the game's entity code (and plugins hooking it, e.g. ZMenu) copy matrices with movaps
-    if (!sd) sd = new (_aligned_malloc(sizeof(SampleDc), 16)) SampleDc();
+    if (!sd) sd = NewSampleDc();
     const float* camp = (const float*)A(G.CamPos);
     const float* rows = (const float*)A(G.CamRows());
     int axis = dirChoice >> 1; float sg = (dirChoice & 1) ? 1.f : -1.f;
